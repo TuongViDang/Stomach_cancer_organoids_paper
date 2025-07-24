@@ -1,0 +1,23 @@
+/* Change title size */
+h1 {
+    font-size: 26px; /* Increased for better hierarchy */
+    font-weight: bold;
+}
+
+/* Change subtitle size */
+h2 {
+    font-size: 22px; /* Slightly larger for clear distinction */
+    font-weight: bold;
+}
+
+/* Change sub-subtitle (h3) size */
+h3 {
+    font-size: 18px; /* Ensure it's smaller than h2 */
+    font-weight: bold;
+}
+
+/* Change body text size */
+p {
+    font-size: 16px; /* Adjusted to maintain proper contrast */
+    line-height: 1.6;
+}

@@ -1,0 +1,134 @@
+---
+title: "Stomach cancer paper Figure Sup 8B"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r }
+library(tidyverse)
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(RCurl)
+library(patchwork)
+library(vegan)
+library(ggpubr)
+library(variancePartition)
+library(edgeR)
+```
+
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data_2")
+dir.create(figures_data)
+```
+
+
+# Fit linear regression models for each patient with clone labelling as the independent variable
+```{r }
+#calculate variance explained by Clone for each sample
+variance_explained <- function(sample, seurat_patient){
+    seurat <- subset(seurat_patient, subset = treatment == sample)
+    expr_mat <- seurat$RNA$counts
+    metadata <- seurat@meta.data %>% select("Clone")
+    # Normalize counts using voom
+    dge <- DGEList(counts = expr_mat)
+    dge <- calcNormFactors(dge)
+    expr_voomed <- voom(dge)$E  # Log2-normalized expression
+
+    # Assuming expr_voomed is your log2-transformed expression data
+    gene_variances <- apply(expr_voomed, 1, var)  # Variance for each gene (rows = genes, columns = samples)
+
+    # Order the genes by variance (highest variance first)
+    ordered_genes_var <- sort(gene_variances, decreasing = TRUE)
+
+    # Select the top N most variated genes (e.g., top 2000 genes)
+    top_genes <- names(ordered_genes_var)[1:2000]
+    # Subset the expression data to include only the top variated genes
+    expr_voomed_top <- expr_voomed[top_genes, ]
+
+    #Formular: both patient and treatment as fixed effect
+    formula <- ~ as.factor(Clone) 
+    varPart <- fitExtractVarPartModel(expr_voomed_top, formula, metadata)
+    colnames(varPart) = c( "Clone","residuals")
+    varPart$Clone
+}
+
+
+variance_patient <- function(patient){
+    seurat_patient <- readRDS( file.path(rds_path,paste0(patient,"_three_samples_final_Clones.rds")))
+    samples = c("Untreated","Ex vivo","In vivo")
+    results_list <- map(samples,~ variance_explained(.x, seurat_patient = seurat_patient))
+    names(results_list) = samples
+    result_df = data.frame(Patient = rep(patient, 6000),
+                           Treatment = rep(c("Untreated", "Ex vivo", "In vivo"), each = 2000),
+                           Variance = unlist(results_list))
+    result_df 
+}
+
+patients = c("OO77", "OO99", "OO100")
+
+All_df = map_dfr(patients, variance_patient)
+All_df = All_df %>% filter(Treatment != "Ex vivo")
+
+All_df$Treatment = factor(All_df$Treatment, levels = c("Untreated",  "In vivo"))
+All_df$Patient = factor(All_df$Patient , levels = patients)
+```
+
+```{r fig.width = 4, fig.height = 7}
+
+cols = c("cadetblue2","plum")
+All_df %>%
+  ggplot(aes(x = Treatment, y = Variance, fill = Treatment)) +
+    geom_jitter(size = 0.1, alpha = 0.05, width = 0.2) +
+    geom_boxplot( width = 0.1, outlier.size = 0.1)+
+    geom_violin(
+    trim = TRUE, 
+    width = 0.5, 
+    alpha = 0.5, 
+    color = "black"
+  ) +  
+    scale_fill_manual(values = cols) +
+    scale_y_continuous(limits = c(-0.05,0.43), breaks = seq(0,0.4,0.2))+
+    ylab("% Variance Explained by genetic clone") +
+    theme_classic() +
+    theme(legend.position = "none", 
+        legend.title = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 17, color = "black"),
+        strip.text = element_text(size = 17, color = "black"),
+        panel.spacing = unit(1.5, "lines") ,
+         strip.background = element_blank(),
+        axis.title.y = element_text(size = 17, color = "black"),
+        axis.text.y = element_text(size = 17,color = "black" ))  +
+    facet_wrap(vars(Patient),  nrow = 3)
+ggsave(file.path(plot_path, "Figure_Sup_8B_Variance_Clone.pdf"), width = 4, height = 7)
+
+rownames(All_df) <- NULL
+write.table(All_df, file.path(figures_data, "Figure_Sup_8B_Variance_Clone.txt"), sep = "\t", quote= F)
+
+```
+
+```{r }
+sessionInfo()
+```

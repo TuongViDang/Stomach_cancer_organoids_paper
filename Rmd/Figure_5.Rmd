@@ -1,0 +1,615 @@
+---
+title: "Stomach cancer paper Figure 5"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r }
+# Load libraries
+library(tidyverse)
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(vegan)
+library(pheatmap)
+library(ggpubr)
+library(patchwork)
+library(RColorBrewer)
+library(ggplot2)
+library(ggforce)
+library(ggrepel)
+library(ggvenn)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+```
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data")
+dir.create(figures_data)
+```
+
+# Load data
+```{r}
+patient="OO77"
+seurat_patient = readRDS(file.path(rds_path,paste0(patient,"_three_samples_final_Clones.rds")))
+table(seurat_patient$Clone)    
+seurat_patient$Clone = as.character(seurat_patient$Clone)
+#Combine 6,7,8
+seurat_patient@meta.data = seurat_patient@meta.data %>% mutate(Clone_new = ifelse(Clone %in% c("7","8"), "6",Clone))
+                                                        
+seurat_patient_sub  = subset(seurat_patient , subset = Clone_new %in% c("2","5a","5b","6") )     
+table(seurat_patient_sub$Clone_new)
+
+
+seurat_patient_sub_2 =  subset(seurat_patient , subset = Clone_new %in% c("2","5a","5b") )     
+
+seurat_patient_sub_6 =  subset(seurat_patient , subset = Clone_new %in% c("6","5a","5b") )     
+```
+
+# Differential analysis of clones markers
+```{r}
+#DE 
+Idents(seurat_patient_sub_2) = "Clone_new"
+Markers_2 <- FindAllMarkers(seurat_patient_sub_2 , verbose = TRUE, only.pos = FALSE)
+
+
+Idents(seurat_patient_sub_6) = "Clone_new"
+Markers_6 <- FindAllMarkers(seurat_patient_sub_6 , verbose = TRUE, only.pos = FALSE)
+
+#Choose avg_log2FC >= 1, pct.1 >= 0.7
+Markers_sig_2 = Markers_2 %>% filter(p_val_adj < 0.05, avg_log2FC >= 0.5, pct.1 >= 0.7)
+table(Markers_sig_2$cluster)
+ 
+
+Markers_sig_6 = Markers_6 %>% filter(p_val_adj < 0.05, avg_log2FC >= 0.5, pct.1 >= 0.7)
+table(Markers_sig_6$cluster)
+```
+# GO analysis of genetic clones' markers
+```{r}
+#GO ANALYSIS
+#Prepare for GO enrichment analysis
+library(org.Hs.eg.db)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+library(ggpubr)
+
+columns(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+All_genes<- AnnotationDbi::mapIds(org.Hs.eg.db,keys=rownames(seurat_patient),keytype='SYMBOL',column=c('ENSEMBL'),muliVals=first)
+All_genes<-All_genes[!(is.na(All_genes))]
+
+
+H<-msigdbr(species = 'Homo sapiens',category='H')
+H.ensemble<-H%>%dplyr::select(gs_name,ensembl_gene)
+
+
+Find_GO_seurat <- function(seurat, Marker_sig){
+  Find_GO <-function(seurat, gene_list){
+    markers_genes <-AnnotationDbi::mapIds(org.Hs.eg.db,keys= gene_list,keytype='SYMBOL',column=c('ENSEMBL'),multiVals='first')
+    markers_genes<-markers_genes[!(is.na(markers_genes))]
+    enrich.cluster <- enricher(markers_genes,universe = All_genes,TERM2GENE = H.ensemble)
+     enrich.cluster_df <- data.frame()
+     if (!(is.null(enrich.cluster ))){
+        enrich.cluster_df <- enrich.cluster@result %>% cbind(Clone = clone,.) %>% filter( p.adjust < 0.05)}
+        enrich.cluster_df 
+} 
+  GO_df = data.frame()
+  for (clone in unique(seurat$Clone_new)){
+    gene_list_clone = Marker_sig %>% filter(cluster == clone) %>% pull(gene)
+    GO_df = rbind(GO_df, Find_GO(seurat, gene_list_clone))
+}
+GO_df
+}
+
+```
+## In vivo dominant clone
+```{r }
+Clone_2_5a_5b_GO = Find_GO_seurat(seurat_patient_sub_2,Markers_sig_2)
+
+
+Clone_2_5a_5b_GO$ID = sub("HALLMARK_", "", Clone_2_5a_5b_GO$ID)
+
+#Dot plot
+
+# Convert GeneRatio to numeric values
+Clone_2_5a_5b_GO <- Clone_2_5a_5b_GO %>%
+  mutate(GeneRatio_numeric = sapply(GeneRatio, function(x) {
+    ratio <- strsplit(x, "/")[[1]]
+    as.numeric(ratio[1]) / as.numeric(ratio[2])
+  })) %>% mutate(neg_log_p_adj = - log10( p.adjust))
+
+
+pathways_2 <- rev(c(
+  "TNFA_SIGNALING_VIA_NFKB", "P53_PATHWAY",
+   "HYPOXIA", "APOPTOSIS","TGF_BETA_SIGNALING", "ANDROGEN_RESPONSE"  ,   "FATTY_ACID_METABOLISM",
+    "OXIDATIVE_PHOSPHORYLATION","ADIPOGENESIS", "E2F_TARGETS",
+  "G2M_CHECKPOINT", "MITOTIC_SPINDLE", "MYC_TARGETS_V1", "MTORC1_SIGNALING"
+))
+```
+
+```{r  fig.width= 7.5, fig.height= 5}
+Clone_2_5a_5b_GO$ID = factor(Clone_2_5a_5b_GO$ID , levels = pathways_2)
+
+plot <- ggplot(Clone_2_5a_5b_GO , aes(x = Clone, y = ID, fill = neg_log_p_adj , size = GeneRatio_numeric)) +
+  geom_point(shape = 21, color = "black") + # shape = 21 allows fill and border colors
+  scale_fill_viridis_c( limits = c(0,12),breaks = seq(0,10,4)) + 
+  scale_size_continuous(limits = c(0, 0.45), breaks = seq(0.05,0.45,0.15)) +  # Set fixed range for size
+  labs(
+    x = "",
+    y = "HALLMARK gene sets",
+    fill = "-log10(adjusted p)",
+    size = "Gene Ratio"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 16, color = "black"),
+    legend.text = element_text(size = 16, color = "black"),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 16, color = "black"), # Adjust text size for clarity
+    axis.text.x = element_text(size = 16, color = "black"),
+  )
+plot
+ggsave(file.path(plot_path, "Figure_5A_GO_Clone_OO77_2_vs_5a_5b.pdf" ), width = 7.5, height = 5, scale = 1)
+
+#save Figures data
+data <- plot$data
+
+write.table(data, file.path(figures_data,"Figure_5A_GO_Clone_OO77_2_vs_5a_5b.txt" ), sep = "\t", quote = F)
+```
+
+# Ex vivo dominant clone
+```{r}
+#For seurat_patient_sub_6
+
+Clone_6_5a_5b_GO = Find_GO_seurat(seurat_patient_sub_6,Markers_sig_6)
+
+
+Clone_6_5a_5b_GO$ID = sub("HALLMARK_", "", Clone_6_5a_5b_GO$ID)
+Clone_6_5a_5b_GO$Clone = factor(Clone_6_5a_5b_GO$Clone , levels = c("6","5a","5b"))
+#Dot plot
+
+# Convert GeneRatio to numeric values
+Clone_6_5a_5b_GO <- Clone_6_5a_5b_GO %>%
+  mutate(GeneRatio_numeric = sapply(GeneRatio, function(x) {
+    ratio <- strsplit(x, "/")[[1]]
+    as.numeric(ratio[1]) / as.numeric(ratio[2])
+  })) %>% mutate(neg_log_p_adj = - log10( p.adjust))
+
+
+
+pathways_6 <- rev(c(
+  "TNFA_SIGNALING_VIA_NFKB", "P53_PATHWAY","XENOBIOTIC_METABOLISM",
+   "OXIDATIVE_PHOSPHORYLATION", "MYC_TARGETS_V1",  "FATTY_ACID_METABOLISM",  "ESTROGEN_RESPONSE_LATE"
+))
+
+Clone_6_5a_5b_GO$ID = factor(Clone_6_5a_5b_GO$ID , levels = pathways_6)
+```
+
+```{r  fig.width= 7.5, fig.height= 4}
+plot <- ggplot(Clone_6_5a_5b_GO , aes(x = Clone, y = ID, fill = neg_log_p_adj , size = GeneRatio_numeric)) +
+  geom_point(shape = 21, color = "black") + # shape = 21 allows fill and border colors
+  scale_fill_viridis_c(limits = c(0,12), breaks = seq(0,12,4)) + 
+  scale_size_continuous(limits = c(0, 0.45), breaks = seq(0.05,0.45,0.15)) +  # Set fixed range for size
+  labs(
+    x = "",
+    y = "HALLMARK pathways",
+    fill = "-log10(adjusted p)",
+    size = "Gene Ratio"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 16, color = "black"),
+    axis.title.y = element_blank(),
+    legend.text = element_text(size = 16, color = "black"),
+    axis.text.y = element_text(size = 16, color = "black"), # Adjust text size for clarity
+    axis.text.x = element_text(size = 16, color = "black")
+  ) + 
+  guides(
+    fill = guide_colorbar(title.position = "top", title.hjust = 0.5, nrow = 1))
+plot
+ggsave(file.path(plot_path, "Figure_5A_GO_Clone_OO77_6_vs_5a_5b.pdf"), width = 7.5, height = 2.8, scale = 1)
+
+#save Figures data
+data <- plot$data
+
+write.table(data, file.path(figures_data,"Figure_5A_GO_Clone_OO77_6_vs_5a_5b.txt" ), sep = "\t", quote = F)
+```
+
+# PIK3CA mutation
+```{r }
+# Load the mutation detected in single cell of scRNA-seq (done with scReadCount and SCOMATIC)=> merge clone 4 and 5 => separate 5a,5b 
+Combined_all = read.delim(file.path(txt_files,paste0(patient, "_Combined_all_merged_separated_c5_filtered.txt")))
+head(Combined_all)
+
+mut = ":3:179234297:A:G"
+CB_pos = Combined_all %>% filter((mutation_id == mut) & (mutated == T)) %>% pull(CB_seurat)
+CB_neg = Combined_all %>% filter((mutation_id == mut)  & (mutated == F)) %>% pull(CB_seurat)
+cluster = Combined_all %>% filter(mutation_id == mut) %>% pull(treeCLUSTER)
+gene = Combined_all %>% filter(mutation_id == mut) %>% pull(Gene_name) %>% unique()
+
+meta = seurat_patient@meta.data 
+meta$CB = rownames(meta)
+meta = meta %>% mutate(mut = case_when( CB %in% CB_pos ~ "ALT",
+                                        CB %in% CB_neg ~ "REF",
+                                        TRUE ~ "Unknown"))
+
+seurat_patient@meta.data = meta
+
+p <- DimPlot(seurat_patient, reduction = "umap", group.by = "mut") + theme_void()
+
+# Extract the data
+plot_data <- p$data
+
+# Reorder the data to ensure gray is plotted first
+plot_data$mut <- factor(plot_data$mut, levels = c(  "ALT",  "REF",  "Unknown" ))
+```
+
+```{r  fig.width= 6, fig.height= 5}
+# Create the plot using ggplot2
+ggplot(plot_data, aes(x = umap_1, y = umap_2, color = mut)) +
+  geom_point(data = subset(plot_data, mut == "Unknown"), size = 1) +
+  geom_point(data = subset(plot_data, mut == "REF"), size = 1.5) +
+  geom_point(data = subset(plot_data, mut == "ALT"), size = 1.5) +
+  scale_color_manual(values = c("Unknown" = "gray", "REF" = "deepskyblue", "ALT" = "brown2")) +
+  ggtitle(paste0(gene,"-cluster ",cluster)) +
+  theme_void()+
+  theme(legend.position = "right", legend.title = element_blank(), legend.text = element_text(size =8))+
+  guides(color = guide_legend(reverse= TRUE))
+ggsave( file.path(plot_path,paste0("Figure_5B_scRNA_detected_mut_",gene,".pdf")),width = 6,height = 5)
+
+write.table(plot_data, file.path(figures_data, paste0("Figure_5B_scRNA_detected_mut_",gene,".txt")), sep = "\t", quote = F)
+```
+
+# Score each cell with pathway score from HALLMARK
+```{r }
+#Load input file
+#Specify the input argument
+processed_file = file.path(rds_path,"doublet_rm_filtered_all_patients_qc.rds")
+seurat_all <- readRDS(processed_file)
+
+
+seurats <- seurat_all[c("OO100-no","OO100-vitro","OO100-vivo","OO77-no","OO77-vitro","OO77-vivo","OO99-no","OO99-vitro","OO99-vivo")]
+#cell cycle markers
+cc.genes.updated.2019
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+# Prepare Hallmark pathways genes list (version 2024)
+Hallmark_files = list.files(file.path(txt_files,"HALLMARK"), full.names = T )
+
+
+Hallmark_df_build <- function(file){
+  lines <- readLines(file)
+  start_line <- grep("^GENE_SYMBOLS\t", lines)
+  end_line <- grep("^FOUNDER_NAMES\t", lines)
+  gene_symbols_lines <- lines[start_line:end_line-1]
+  gene_symbols_combined <- paste(gene_symbols_lines, collapse = " ")
+  gene_symbols <- unlist(strsplit(gsub("GENE_SYMBOLS\t|FOUNDER_NAMES\t", "", gene_symbols_combined), ","))
+  gene_symbols <- trimws(gene_symbols)
+  gene_symbols
+}
+
+Hallmark_genes_lists <- lapply(Hallmark_files, Hallmark_df_build )
+Pathway_names = sapply(Hallmark_files, function(file){ str_extract(basename(file), "(?<=_)[^.]+")})
+names(Hallmark_genes_lists) = Pathway_names 
+
+
+
+seurats_list = list()
+for (i in seq_along(seurats)) {
+seurat = seurats[[i]]
+DefaultAssay(seurat) = "RNA"
+seurat <- NormalizeData(seurat, verbose = TRUE)
+#Add cell cycle score
+seurat <- CellCycleScoring(seurat, g2m.features=g2m.genes, s.features=s.genes)
+
+# Add Module Scores for these pathways
+
+seurat <- AddModuleScore(seurat, features = Hallmark_genes_lists )
+
+seurats_list[[i]] = seurat
+}
+
+seurat_merged = seurats_list[[1]]
+for (i in 2:9){
+   seurat_merged = merge(seurat_merged ,  seurats_list[[i]])
+}
+
+
+DefaultAssay(seurat_merged)<-'RNA'
+options(future.globals.maxSize = 17 * 1024^3)
+seurat_merged <- SCTransform(seurat_merged, vst.flavor = "v1",
+                                 #method = "glmGamPoi",
+                                 verbose = FALSE)
+seurat_merged <- RunPCA(seurat_merged, npcs = 30, )
+seurat_merged <- RunUMAP(seurat_merged, reduction = "pca", dims = 1:30, verbose = F)
+
+seurat_merged$Patient<- str_extract(seurat_merged$orig.ident,"^[^[_-]]*")
+seurat_merged$Treatment<-str_extract(seurat_merged$orig.ident,"[^-]*$")
+
+meta <- seurat_merged@meta.data
+meta <- meta %>%
+  mutate(Sample = case_when(
+    grepl("-no", orig.ident) ~ sub("-no", " Untreated", orig.ident),
+    grepl("-vitro", orig.ident) ~ sub("-vitro", " Ex vivo", orig.ident),
+    grepl("-vivo", orig.ident) ~ sub("-vivo", " In vivo", orig.ident),
+    TRUE ~ orig.ident
+  ),
+   Treatment = sub("^[^ ]* ","",Sample))
+
+
+colnames(meta)[14] = Pathway_names 
+seurat_merged@meta.data <- meta
+
+#saveRDS(seurat_merged, file.path(rds_path, "seurat_merged_NFKB_scored.rds" ))
+#seurat_merged = readRDS(file.path(rds_path, "seurat_merged_NFKB_scored.rds"))
+```
+# Intra-genetic clone comparision
+
+```{r }
+#### Get genetic clone labelling
+
+OO77_no = readRDS(file.path(rds_path, "OO77-no_Clones_merged_separated_c5_filtered.RDS" ))
+OO77_vitro = readRDS(file.path(rds_path, "OO77-vitro_Clones_merged_separated_c5_filtered.RDS"))
+OO77_vivo =  readRDS(file.path(rds_path, "OO77-vivo_Clones_merged_separated_c5_filtered.RDS" ))
+
+
+OO99_no = readRDS(file.path(rds_path, "OO99-no_Clones_filtered.RDS" ))
+OO99_vitro = readRDS(file.path(rds_path, "OO99-vitro_Clones_filtered.RDS"))
+OO99_vivo =  readRDS(file.path(rds_path, "OO99-vivo_Clones_filtered.RDS" ))
+
+OO100_no = readRDS(file.path(rds_path , "OO100-no_Clones_filtered.RDS" ))
+OO100_vitro = readRDS(file.path(rds_path, "OO100-vitro_Clones_filtered.RDS"))
+OO100_vivo =  readRDS(file.path(rds_path, "OO100-vivo_Clones_filtered.RDS" ))
+
+meta_77 = rbind(OO77_no@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")], 
+                 OO77_vitro@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")]) %>% 
+            rbind(OO77_vivo@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")])
+
+meta_99 = rbind(OO99_no@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")], 
+                 OO99_vitro@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")]) %>% 
+            rbind(OO99_vivo@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")])
+
+meta_100 = rbind(OO100_no@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")], 
+                 OO100_vitro@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")]) %>% 
+            rbind(OO100_vivo@meta.data[,c("CB_seurat","Clone","orig.ident", "Phase", "seurat_clusters")])
+
+
+# Compare  Untreated and In vivo of the same clone
+## OO77
+seurats_OO77 = subset( seurat_merged, subset = orig.ident %in% c("OO77-no","OO77-vivo"))
+meta_77_no_vivo = seurats_OO77@meta.data 
+meta_77_no_vivo$CB_seurat = rownames(meta_77_no_vivo )
+meta_77_no_vivo = meta_77_no_vivo %>% left_join(meta_77[,c("CB_seurat", "Clone")], by = "CB_seurat")
+seurats_OO77@meta.data = meta_77_no_vivo
+rownames(seurats_OO77@meta.data) = seurats_OO77@meta.data$CB_seurat
+table(seurats_OO77$Sample,seurats_OO77$Clone) #remove 5b,7,8 not at least 3 cells in both
+
+
+meta_77_no_vivo =  meta_77_no_vivo %>% select(CB_seurat,Patient, Treatment, Clone, TNFA_SIGNALING_VIA_NFKB)
+meta_77_no_vivo = meta_77_no_vivo   %>% filter(Clone %in% c("2","5a","6") )
+
+OO77_summary = meta_77_no_vivo %>% group_by(Clone, Treatment) %>% summarize(mean_pathway = mean( TNFA_SIGNALING_VIA_NFKB), n_cell = n())
+OO77_summary$Treatment = factor(OO77_summary$Treatment , levels = c("Untreated", "In vivo"))
+OO77_summary$Clone = factor(OO77_summary$Clone , levels  = c("2","5a","6"))
+
+clone_colors_77 <- c(`2` = "lightgreen", `5a` =  "lightblue",`5b` = "dodgerblue4", 
+  `6` = "mediumseagreen",`7` = "plum", `8` = "lightgoldenrod1", `UnI` = "gray92"  # Color for NA cells
+)
+```
+
+```{r fig.width = 6, fig.height= 5}
+#OO77_summary <- OO77_summary %>%
+  #mutate(hjust_pos = ifelse(Treatment == "Untreated", 1.2, -0.4))  # tweak value for better spacing
+
+OO77_summary %>% 
+  ggplot(aes(x = Treatment, y = mean_pathway, group = Clone)) +
+  geom_point(aes(colour = Treatment), 
+             size = 2, 
+             position = position_dodge(width = 0)) + 
+  geom_line(aes(group = Clone, colour = Clone), 
+            linewidth = 1.5, 
+            alpha = 1, 
+            position = position_dodge(width = 0)) +
+  #geom_text(aes(label = n_cell,hjust = hjust_pos, colour = Clone), 
+  #          size = 3, 
+  #          position = position_dodge(width = 0)) +  # label with n_cell
+  scale_color_manual(values = c("Untreated" = "deepskyblue2", 
+                                "In vivo" = "plum", 
+                                clone_colors_77)) +
+  scale_y_continuous(limits = c(-0.05, 0.1)) +
+  ylab("Mean Pathway Score") +
+  ggtitle("OO77")+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 15, color = "black", face = "bold"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 15, color = "black"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 15, color = "black"),
+    axis.title.y = element_text(size = 15, color = "black"),
+    axis.text.y = element_text(size = 15, color = "black"),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+ggsave(file.path(plot_path , "Figure_5C_NFKB_pathway_score_intra_genetic_clone_OO77.pdf"),width= 6,height= 5,scale = 1)
+
+#save Figure data
+write.table(meta_77_no_vivo , file.path(figures_data, "Figure_5C_NFKB_pathway_score_intra_genetic_clone_OO77.txt"), sep = "\t", quote = F)
+```
+
+```{r }
+##OO99
+seurats_OO99 = subset( seurat_merged, subset = orig.ident %in% c("OO99-no","OO99-vivo"))
+meta_99_no_vivo = seurats_OO99@meta.data 
+meta_99_no_vivo$CB_seurat = rownames(meta_99_no_vivo )
+meta_99_no_vivo = meta_99_no_vivo %>% left_join(meta_99[,c("CB_seurat", "Clone")], by = "CB_seurat")
+seurats_OO99@meta.data = meta_99_no_vivo
+rownames(seurats_OO99@meta.data) = seurats_OO99@meta.data$CB_seurat
+table(seurats_OO99$Sample,seurats_OO99$Clone) #remove 2,7,9,12 not at least 3 cells in both
+
+
+meta_99_no_vivo =  meta_99_no_vivo %>% select(CB_seurat,Patient, Treatment, Clone, TNFA_SIGNALING_VIA_NFKB)
+
+meta_99_no_vivo = meta_99_no_vivo %>% filter(Clone %in% c("3","4","6","8","10","11"))
+
+OO99_summary = meta_99_no_vivo %>% group_by(Clone, Treatment) %>% summarize(mean_pathway = mean( TNFA_SIGNALING_VIA_NFKB), n_cell = n())
+OO99_summary$Treatment = factor(OO99_summary$Treatment , levels = c("Untreated", "In vivo"))
+OO99_summary$Clone = factor(OO99_summary$Clone , levels  = c("3","4","6","8","10","11"))
+
+clone_colors_99 <- c( `2`= "aquamarine2", `3` = "moccasin" , `4` = "dodgerblue4", `6` ="yellow2",
+            `7` = "lightseagreen", `8` = "lightsalmon4" , `9`= "plum" , 
+             `10` = "tomato", `11` = "mediumseagreen", `12` = "purple", `UnI` = "gray92"  # Color for NA cells
+)
+```
+
+```{r fig.width = 6, fig.height= 5}
+#OO99_summary <- OO99_summary %>%
+       # mutate(hjust_pos = ifelse(Treatment == "Untreated", 1.5, -0.5))  # tweak value for better spacing
+
+
+
+OO99_summary  %>% 
+  ggplot(aes(x = Treatment, y = mean_pathway, group = Clone)) +
+  geom_point(aes(colour = Treatment), 
+             size = 2, 
+             position = position_dodge(width = 0)) + 
+  geom_line(aes(group = Clone, colour = Clone), 
+            linewidth = 1.5, 
+            alpha = 1, 
+            position = position_dodge(width = 0)) +
+  #geom_text(aes(label = n_cell,hjust = hjust_pos, colour = Clone), 
+  #          size = 2.5, 
+  #          position = position_dodge(width = 0)) +  # label with n_cell
+  scale_color_manual(values = c("Untreated" = "deepskyblue2", 
+                                "In vivo" = "plum", 
+                                clone_colors_99)) +
+  scale_y_continuous(limits = c(-0.01, 0.12)) +
+  ylab("Mean Pathway Score") +
+  ggtitle("OO99")+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 15, color = "black", face = "bold"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 15, color = "black"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 15, color = "black"),
+    axis.title.y = element_text(size = 15, color = "black"),
+    axis.text.y = element_text(size = 15, color = "black"),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+
+ggsave(file.path(plot_path,  "Figure_5C_NFKB_pathway_score_intra_genetic_clone_OO99.pdf"),width= 6,height= 5,scale = 1)
+
+
+#save Figure data
+write.table(meta_99_no_vivo , file.path(figures_data, "Figure_5C_NFKB_pathway_score_intra_genetic_clone_OO99.txt"), sep = "\t", quote = F)
+```
+
+```{r}
+##OO100
+seurats_OO100 = subset( seurat_merged, subset = orig.ident %in% c("OO100-no","OO100-vivo"))
+meta_100_no_vivo = seurats_OO100@meta.data 
+meta_100_no_vivo$CB_seurat = rownames(meta_100_no_vivo )
+meta_100_no_vivo = meta_100_no_vivo %>% left_join(meta_100[,c("CB_seurat", "Clone")], by = "CB_seurat")
+seurats_OO100@meta.data = meta_100_no_vivo
+rownames(seurats_OO100@meta.data) = seurats_OO100@meta.data$CB_seurat
+table(seurats_OO100$Sample,seurats_OO100$Clone) #remove 2,5,7,9, 10,11,12 not at least 3 cells in both
+
+
+meta_100_no_vivo =  meta_100_no_vivo %>% select(CB_seurat,Patient, Treatment, Clone, TNFA_SIGNALING_VIA_NFKB)
+meta_100_no_vivo = meta_100_no_vivo  %>% filter(Clone %in% c("3","4","8"))
+
+OO100_summary = meta_100_no_vivo %>%  group_by(Clone, Treatment) %>% summarize(mean_pathway = mean( TNFA_SIGNALING_VIA_NFKB),  n_cell = n())
+OO100_summary$Treatment = factor(OO100_summary$Treatment , levels = c("Untreated", "In vivo"))
+OO100_summary$Clone = factor(OO100_summary$Clone , levels  = c("3","4","8"))
+
+clone_colors_100 <- c( `2` = "burlywood2",
+            `3` = "mediumseagreen",
+            `4` = "red",
+            `5` = "tan4", 
+            `7` = "plum", 
+            `8` = "dodgerblue4", 
+            `9` = "purple",
+            `10` = "yellow2",
+            `11` = "lightpink",
+            `12` = "darkorange",
+            `UnI` = "gray92"  # Color for NA cells
+)
+```
+
+```{r fig.width = 6, fig.height= 5}
+#OO100_summary <- OO100_summary %>%
+#        mutate(hjust_pos = ifelse(Treatment == "Untreated", 1.5, -0.5))  # tweak value for better spacing
+
+
+OO100_summary %>%  
+  ggplot(aes(x = Treatment, y = mean_pathway, group = Clone)) +
+  geom_point(aes(colour = Treatment), 
+             size = 2, 
+             position = position_dodge(width = 0)) + 
+  geom_line(aes(group = Clone, colour = Clone), 
+            linewidth = 1.5, 
+            alpha = 1, 
+            position = position_dodge(width = 0)) +
+  #geom_text(aes(label = n_cell,hjust = hjust_pos, colour = Clone), 
+  #         size = 2.5, 
+  #         position = position_dodge(width = 0)) +  # label with n_cell
+  scale_color_manual(values = c("Untreated" = "deepskyblue2", 
+                                "In vivo" = "plum", 
+                                clone_colors_100)) +
+  scale_y_continuous(limits = c(-0.01, 0.12)) +
+  ylab("Mean Pathway Score") +
+  ggtitle("OO100")+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 15, color = "black", face = "bold"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 15, color = "black"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 15, color = "black"),
+    axis.title.y = element_text(size = 15, color = "black"),
+    axis.text.y = element_text(size = 15, color = "black"),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+ggsave(file.path(plot_path,  "Figure_5C_NFKB_pathway_score_intra_genetic_clone_OO100.pdf"),width= 6,height= 5,scale = 1)
+
+#save Figure data
+write.table(meta_100_no_vivo , file.path(figures_data, "Figure_5C_NFKB_pathway_score_intra_genetic_clone_OO100.txt"), sep = "\t", quote = F)
+```
+```{r }
+sessionInfo()
+```

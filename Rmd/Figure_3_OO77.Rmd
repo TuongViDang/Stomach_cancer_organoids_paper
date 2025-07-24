@@ -1,0 +1,190 @@
+
+---
+title: "Stomach cancer paper Figure 3 OO77"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+Bulk WGS-deconvoluted cancer evolution tree  for patient OO77 (done with Conipher): 
+```{r tree, echo=FALSE, out.width="150%"}
+knitr::include_graphics("/group/poetsch_projects/poetsch_sc/Stomach_paper_repository/Notebooks/Images/OO77_tree.jpeg")
+```
+
+```{r }
+library(tidyverse)
+library(ggpubr)
+library(RColorBrewer)
+library(fishplot)
+source("/group/poetsch_projects/poetsch_sc/Conifer/script/fishplot_package/object.R")
+```
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data")
+dir.create(figures_data)
+```
+
+
+```{r }
+patient = "OO77"
+
+tree_df = read.delim(file.path(txt_files,paste0(patient,"_allTrees.txt")),comment.char = "#",header=F)
+colnames(tree_df) = c("parent","clusterID")
+tree_df = rbind(c(0,10),tree_df)
+
+# Define mapping for replacements
+clusterID_map <- c(`10` = 1, `1` = 3, `6` = 4, `2` = 5, `5` = 6, `11` = 7, `9` = 8, `3` = 2)
+
+# Apply transformations
+tree_df <- tree_df %>%
+  mutate(
+    clusterID = ifelse(clusterID %in% names(clusterID_map), clusterID_map[as.character(clusterID)], clusterID),
+    parent = ifelse(parent %in% names(clusterID_map), clusterID_map[as.character(parent)], parent)
+  )
+
+
+Find_direct_children <- function(cluster,tree){
+    direct_children = tree %>% filter(parent == cluster) %>% pull(clusterID)
+    direct_children
+}
+
+Find_all_children <- function(cluster,tree) {
+  all_children <- vector()
+  direct_children <- Find_direct_children(cluster,tree=tree)
+  all_children <- c(all_children, direct_children)
+  for (child in direct_children) {
+    grandchildren <- Find_all_children(child, tree = tree)
+    all_children <- c(all_children, grandchildren)
+  }
+  return(all_children)
+}
+
+Clones_all = read.delim(file.path(txt_files, paste0(patient, "_cloneProportionsMinErrorTrees.txt")))
+
+# Apply transformations
+Clones_all <- Clones_all%>%
+  mutate(
+    clusterID = ifelse(clusterID %in% names(clusterID_map), clusterID_map[as.character(clusterID)], clusterID)
+  )
+Clones_all <- Clones_all  %>% left_join(tree_df,by = "clusterID")
+
+
+
+
+New_proportion <- function(cluster,sample,clones_df,tree){
+    children = Find_all_children(cluster,tree = tree)
+    children = c(cluster,children)
+    children_in_sample = clones_df[(clones_df[sample] > 0 ) & clones_df$clusterID %in% children,]
+    Sum_Pro_in_Sample = sum(children_in_sample[sample])
+    return(Sum_Pro_in_Sample)
+    
+}
+
+tumor_new = purrr::map(Clones_all$clusterID,~ New_proportion(.x,sample = paste0(patient,"_tumor"),clones_df = Clones_all, tree=tree_df)) %>% unlist()
+ex_new = purrr::map(Clones_all$clusterID,~ New_proportion(.x,sample = paste0(patient,"_ex"),clones_df = Clones_all, tree=tree_df)) %>% unlist()
+in_new = purrr::map(Clones_all$clusterID,~ New_proportion(.x,sample = paste0(patient,"_in"),clones_df = Clones_all, tree=tree_df)) %>% unlist()
+
+Clones_all_new = data.frame(clusterID = Clones_all$clusterID, parent= Clones_all$parent,tumor = tumor_new, ex_vivo = ex_new, in_vivo = in_new)
+
+#rename the cluster
+clusterID <- Clones_all_new$clusterID
+names(clusterID) <- rownames(Clones_all_new)
+parentIDs_new = c()
+ for (x in Clones_all_new$parent){ 
+    if (x == 0){x_new = 0}
+    else{
+     x_new = names(clusterID)[clusterID == x] }
+    parentIDs_new = c(parentIDs_new,x_new)
+  }
+```
+
+# Clone evolution in ex vivo sample
+
+```{r fig.width = 13.5, fig.height = 6.5}
+cols <- c("darkkhaki", "dodgerblue4", "lightgreen", "mediumseagreen", "lightpink",  "lightgoldenrod1","cadetblue2","plum") 
+
+names(cols) <- clusterID
+
+#Untreated and ex vivo
+    timepoints=c(0,1)      
+ 
+
+    frac.table = as.matrix(Clones_all_new[,c(3,4)])
+    #provide a vector listing each clone's parent
+    #(0 indicates no parent)
+    parents = as.integer(parentIDs_new)
+
+    #create a fish object
+    fish = createFishObject(frac.table,parents,timepoints=timepoints)
+
+    #calculate the layout of the drawing
+    fish = layoutClones(fish)
+    
+
+    #draw the plot, using the splining method (recommended)
+    #and providing both timepoints to label and a plot title
+
+    names(cols) <- clusterID
+    fish@col = cols
+
+    fishPlot(fish,shape="spline",title.btm=patient, pad.left = 1, ramp.angle = 3,
+             cex.title=0.7, vlines=c(0,1), 
+            # vlab=c( "Untreated","Ex vivo treated"),
+            bg.col = c("white","white","white"))
+```    
+
+# Clone evolution in in vivo sample
+```{r fig.width = 13.5, fig.height = 6.5}
+#In vivo 
+    timepoints=c(0,1)      
+    
+    #create new column as pseudo in vivo only contain clone 2 (clone 3 in this table)
+    Clones_all_new$pseudo_in = c(0,0,100,0,0,0,0,0)
+    frac.table = as.matrix(Clones_all_new[,c(6,6)])
+
+    #provide a vector listing each clone's parent(0 indicates no parent)
+    parents = as.integer(parentIDs_new)
+    #change the parent of 3 to 0
+    parents[3] = 0
+    #create a fish object
+    fish = createFishObject(frac.table,parents,timepoints=timepoints)
+
+    #calculate the layout of the drawing
+    fish = layoutClones(fish)
+    fish@col = cols
+
+
+    fishPlot(fish,shape="spline",title.btm=patient, pad.left = 1, ramp.angle = 3,
+             cex.title= 0.7, 
+            # vlines=c(0,1), 
+            # vlab=c( "Untreated","In vivo treated"),
+            bg.col = c("white","white","white"))
+
+
+#Save data
+write.table(Clones_all_new,file.path(figures_data, paste0("Figure_3_bulkWGS_Clone_evolution_",patient,".txt")), sep = "\t", quote = F)
+
+```
+
+
+```{r }
+sessionInfo()
+```

@@ -1,0 +1,367 @@
+---
+title: "Stomach cancer paper Figure 7 FigSup 9"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+```{r}
+# Load libraries
+library(Seurat)
+library(SeuratObject)
+library(Matrix)
+library(tidyverse)
+library(pheatmap)
+library(CellChat)
+library(patchwork)
+library(RColorBrewer)
+library(cowplot)
+library(magrittr)
+library(ggpubr)
+```
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data_2")
+dir.create(figures_data)
+```
+
+# Top 100 ligand-receptor interactions
+
+```{r fig.width = 4.5, fig.height = 4}
+# Load Liana result 
+context_df_dict <- readRDS(file.path(rds_path ,"Liana_context_df_dict.rds"))
+
+sets = list(Untreated = c(1,4,7), vitro = c(2,5,8),vivo = c(3,6,9))
+
+
+par(mfrow = c(1, 3), xpd = TRUE)
+
+for (index in 1:3){
+sample = names(sets)[index]
+dict_sub <- context_df_dict[sets[[index]]]
+top_100 <- purrr::map_dfr(dict_sub, ~ head(.x,100))
+top_100$source = factor(top_100$source, levels = 1:9)
+top_100$target = factor(top_100$target, levels = 1:9)
+df = as.matrix(table(top_100$source,top_100$target))
+#Plot heatmap of interaction
+plot = pheatmap(df,
+        show_rownames=T, show_colnames=T,
+        cluster_col=F, display_numbers=F, cluster_row=F, fontsize=17,
+        color = colorRampPalette(brewer.pal(n = 7, name ="OrRd")[c(1,3,6,7)])(80),breaks = seq(0,40,0.5)
+         #,filename=file.path(plot_path,paste0("Figure_7A_heatmap_sender_receiver_",sample, ".pdf")), width =  6, height = 6
+)
+#save Figure data 
+write.table(df, file.path(figures_data, paste0("Figure_7A_heatmap_sender_receiver_",sample, ".txt")), sep = "\t", quote = F)
+
+}
+
+```
+
+# Top ligands from the top 100 ligand-receptor interactions
+
+```{r fig.width = 17, fig.height = 10}
+plots <- list()
+for (index in 1:3){
+sample = names(sets)[index]
+dict_sub <- context_df_dict[sets[[index]]]
+top_100 <- purrr::map_dfr(dict_sub, ~ head(.x,100))
+
+#ligand
+top_100_ligand <- top_100 %>% group_by(ligand.complex) %>% summarize(count = n(),cluster=source,receptor.complex=receptor.complex) %>% arrange(desc(count)) 
+top_100_ligand$cluster <- factor(top_100_ligand$cluster,levels= 1:9)
+top_lig = unique(top_100_ligand$ligand.complex ) %>% head(10)
+top_100_ligand <- top_100_ligand %>% filter(ligand.complex %in% top_lig)
+top_100_ligand$ligand.complex <- factor(top_100_ligand$ligand.complex,levels= rev(top_lig))
+
+#Set color
+custom_palette <- c(  "#80B1D3", "limegreen", "#FCCDE5" ,
+                  "#FDB462","#D9D9D9", "#CCEBC5" ,
+                 "#BC80BD" , "khaki1",  "brown1")   
+
+top_100_ligand$count = rep(1, nrow(top_100_ligand))
+# Create plot for top 200 ligands
+p1 <- top_100_ligand  %>%
+  ggplot(aes(x = ligand.complex, y = count, fill = cluster)) +
+  geom_bar(stat = "identity", position = "stack", width=0.8) +
+  scale_fill_manual(values = custom_palette) + theme_bw()+
+  coord_flip() +
+  labs(title = sample) + 
+  theme(
+       plot.title = element_text(size = 28, color = "black"),
+       legend.title = element_text(size = 28, color = "black"),
+       legend.text = element_text(size = 28, color = "black"),
+       axis.title.y.left = element_blank(),
+       axis.text.y.left = element_text(size = 28, color = "black"),
+       axis.text.x.bottom = element_text(size = 28,color = "black" ),
+        axis.title.x.bottom = element_text(size = 28, color = "black"))
+#ggsave(file.path(plot_path, paste0("Figure_7C_top_ligands_",sample,".pdf")) , width = 8, height = 8)
+data <- p1$data 
+write.table(data, file.path(figures_data, paste0("Figure_7C_top_ligands_",sample, ".txt")), sep = "\t", quote = F)
+plots[[index]] <- p1
+
+}
+combined_plot <- ggpubr::ggarrange(plots[[1]], plots[[3]], ncol = 2, common.legend = TRUE, legend = "right")
+combined_plot
+# Save the combined plot
+ggsave(file.path(plot_path, paste0("Figure_7C_top_ligands_.pdf")) , width = 8, height = 8)
+
+```
+
+# Circle plots of top 50 interactions 
+
+```{r fig.width = 11, fig.height = 11}
+seurat_integrated <- readRDS(file.path(rds_path, "clustered_0.35_integrated_seurat_ref.rds"))
+cluster_sizes = as.data.frame(table(seurat_integrated@meta.data$orig.ident,seurat_integrated@meta.data$seurat_clusters ))
+colnames(cluster_sizes) = c("orig.ident", "cluster","count")
+
+### Circle plots
+
+#pdf(file.path(plot_path, "Figure_7B_all_circle_plots.pdf"), width = 12, height = 12)
+par(mfrow = c(3, 3), xpd = TRUE)
+
+for (sample_name in names(context_df_dict)[1:9]) {
+  topn = 50
+  context_df_dict_top <- lapply(context_df_dict,function(df){head(df,topn)}) 
+  sample<-context_df_dict_top[[sample_name]]
+count_data <- sample %>%
+  group_by(source, target) %>%
+  tally()
+
+wider_data <- count_data %>%
+  pivot_wider(names_from = target, values_from = n, values_fill = 0)
+
+
+rowname<- paste0("c",wider_data$source)
+wider_data<-wider_data[,2:ncol(wider_data)]
+
+rownames(wider_data)<-rowname
+colnames(wider_data)<-as.factor(paste0("c",colnames(wider_data)))
+
+#add missing cluster
+levels<-c("c1","c2","c3","c4","c5","c6","c7","c8","c9")
+colors <- custom_palette
+
+new_row=rep(0,ncol(wider_data))
+for (i in levels){
+  if (!(i %in% rownames(wider_data))){
+    wider_data=rbind(wider_data,new_row)
+    rownames(wider_data)[nrow(wider_data)]=i
+  }
+}
+rowname=rownames(wider_data)
+
+new_col=rep(0,nrow(wider_data))
+for (i in levels){
+  if (!(i %in% colnames(wider_data))){
+    wider_data=cbind(wider_data,new_col)
+  colnames(wider_data)[ncol(wider_data)]=i
+  }
+}
+
+rownames(wider_data)<-rowname
+
+groupSize <- cluster_sizes %>% filter(orig.ident == sample_name)%>%pull(count)
+names(groupSize)<-levels
+matrix<-as.matrix(wider_data)
+
+matrix<-matrix[levels,levels]
+# Plot
+  netVisual_circle(
+    matrix,
+    color.use = custom_palette,
+    vertex.weight = groupSize,
+    vertex.label.cex = 2,
+    vertex.label.color = "black",
+    weight.scale = TRUE,
+    label.edge = FALSE,
+    edge.width.max = 8,
+    title.name = sample_name
+  )
+write.table(matrix, file.path(figures_data,paste0( "Figure_7B_circle_plot_top_50_interaction_", sample_name, ".txt")), sep = "\t", quote =F )
+}
+
+#dev.off()
+```
+
+# Receptors of top ligands 
+
+```{r }
+# Initialize variables to store unique receptors
+all_receptors <- c()
+
+# First loop to gather all unique receptors across both samples
+for (index in c(1, 3)) {
+sample = names(sets)[index]
+dict_sub <- context_df_dict[sets[[index]]]
+top_100 <- purrr::map_dfr(dict_sub, ~ head(.x,100))
+top_100_ligand <- top_100 %>% group_by(ligand.complex) %>% summarize(count = n(),cluster=source,receptor.complex=receptor.complex) %>% arrange(desc(count)) 
+top_100_ligand$cluster <- factor(top_100_ligand$cluster,levels= 1:9)
+top_lig = unique(top_100_ligand$ligand.complex ) %>% head(10)
+top_100_ligand <- top_100_ligand %>% filter(ligand.complex %in% top_lig)
+top_100_ligand$ligand.complex <- factor(top_100_ligand$ligand.complex,levels= rev(top_lig))
+top_rec <- unique(top_100_ligand$receptor.complex) 
+all_receptors <- union(all_receptors, top_rec)
+}
+
+# Create a consistent color palette for all receptors
+set2_palette <- brewer.pal(8, "Set2")
+set3_palette <- brewer.pal(12, "Set3")
+set1_palette <- brewer.pal(8, "Set1")
+dark2_palette <- brewer.pal(8, "Dark2")
+combined_palette <- c(set2_palette, set3_palette, set1_palette,dark2_palette )
+
+# Ensure that we have enough colors for all receptors
+receptor_colors <- setNames(combined_palette[1:length(all_receptors)], all_receptors)
+```
+
+```{r  fig.width = 22, fig.height = 10}
+# Initialize a list to store plots
+plots <- list()
+
+# Second loop to generate plots with consistent colors
+for (index in c(1, 3)) {
+  sample = names(sets)[index]
+  dict_sub <- context_df_dict[sets[[index]]]
+  top_100 <- purrr::map_dfr(dict_sub, ~ head(.x, 100))
+
+  # Process ligands
+  top_100_ligand <- top_100 %>% 
+    group_by(ligand.complex) %>% 
+    summarize(count = n(), cluster = source, receptor.complex = receptor.complex) %>% 
+    arrange(desc(count))
+  
+  top_100_ligand$cluster <- factor(top_100_ligand$cluster, levels = 0:13)
+  top_lig <- unique(top_100_ligand$ligand.complex) %>% head(10)
+  top_100_ligand <- top_100_ligand %>% 
+    filter(ligand.complex %in% top_lig)
+  top_100_ligand$ligand.complex <- factor(top_100_ligand$ligand.complex, levels = rev(top_lig))
+
+  # Apply consistent colors based on the common receptor set
+  top_100_ligand$receptor.complex <- factor(top_100_ligand$receptor.complex, levels = all_receptors)
+  top_100_ligand$count = rep(1, nrow(top_100_ligand))
+
+  # Plot top ligands and their interaction partners (p3)
+  p3 <- top_100_ligand %>%
+    ggplot(aes(x = ligand.complex, y = count, fill = receptor.complex)) +
+    geom_bar(stat = "identity", position = "stack", width = 0.8) +
+    scale_fill_manual(values = receptor_colors) + 
+    theme_bw() +
+    coord_flip() +
+    labs(title = paste0("Top Ligands Partners (", sample, ")")) + 
+    theme(
+      plot.title = element_text(size = 25, color = "black"),
+      legend.position = "right", 
+      legend.title = element_blank(),
+      legend.text =  element_text(size = 25, color = "black"),
+      axis.text.y.left = element_text(size = 25, color = "black"),
+      axis.title.y.left = element_blank(),
+      axis.text.x.bottom = element_text(size = 25, color = "black"),
+      axis.title.x.bottom = element_text(size = 25, color = "black")
+    )
+  
+   #save data
+  data <- p3$data
+  write.table(data, file.path(figures_data, paste0("Figure_Sup_9A_top_ligands_Rpartners_",sample, ".txt")), sep = "\t", quote = F)
+  # Store the plot in the list
+  plots[[index]] <- p3
+
+ 
+}
+
+# Combine the two plots into one figure, arranged in one row
+combined_plot <- ggpubr::ggarrange(plots[[1]], plots[[3]], ncol = 2, common.legend = FALSE, legend = "right")
+combined_plot
+# Save the combined plot
+ggsave(file.path(plot_path, "Figure_Sup_9A_top_ligands_Rpartners.pdf"), width = 22, height = 10)
+```
+
+# Receptors of cytokines: Gene Expression between Untreated and in vivo treated samples
+```{r }
+
+#Receptor of ligand cluster 9
+
+Genes =  c("SDC1","SDC3","ADRA2A","DPP4")
+
+meta <- seurat_integrated@meta.data
+meta$CB_seurat <- rownames(meta)
+meta <- meta %>%
+  mutate(treatment = case_when(
+    grepl("-no", orig.ident) ~ "Untreated",
+    grepl("-vitro", orig.ident) ~ "Ex vivo",
+    grepl("-vivo", orig.ident) ~ "In vivo",
+    TRUE ~ orig.ident)
+  )
+meta <- meta %>% mutate(patient = sub("-.*","",orig.ident))
+
+seurat_integrated@meta.data <- meta
+rownames(seurat_integrated@meta.data) <- rownames(meta)
+
+norm_data = seurat_integrated$SCT$data
+norm_data_genes = as.data.frame(norm_data[Genes,])
+norm_data_genes$gene = rownames(norm_data_genes)
+norm_data_genes_longer = norm_data_genes %>%  pivot_longer(cols = 1:(ncol(norm_data_genes)-1),names_to = "CB_seurat", values_to = "Expression")
+norm_data_genes_longer = norm_data_genes_longer %>% left_join(meta[, c("CB_seurat","patient", "treatment", "seurat_clusters")], by = "CB_seurat")
+norm_data_genes_longer$treatment = factor(norm_data_genes_longer$treatment, levels = c("Untreated", "Ex vivo", "In vivo"))
+norm_data_genes_longer$patient = factor(norm_data_genes_longer$patient, levels = c("OO77", "OO100", "OO99"))
+norm_data_genes_longer$gene = factor(norm_data_genes_longer$gene, levels = Genes)
+
+summary_by_cluster = norm_data_genes_longer  %>% group_by(gene,patient,treatment,seurat_clusters) %>% 
+                                                  summarize(mean = mean(Expression)) 
+
+custom_palette <- c(  "#80B1D3", "limegreen", "#FCCDE5" ,
+                  "#FDB462","#D9D9D9", "#CCEBC5" ,
+                 "#BC80BD" , "khaki1",  "brown1")   
+```
+
+```{r fig.width=13, fig.height= 10 }
+ggplot(summary_by_cluster %>% filter(treatment != "Ex vivo"), aes(x = treatment, y = mean, group = seurat_clusters, color = seurat_clusters)) +
+  geom_point( size = 2, position = position_dodge(width = 0.1)) +
+  geom_line(aes(group = seurat_clusters, color = seurat_clusters), linewidth = 1.5, alpha = 1, position = position_dodge(width = 0)) +
+  ylab("Mean Expression") +
+  scale_color_manual(values = custom_palette  ) +
+  #geom_text(aes(label = seurat_clusters), vjust = -0.5, position = position_dodge(width = 0.5), size = 3) +
+  theme_classic() +
+  theme(legend.title = element_blank(),
+        legend.text =  element_text(size = 22, color = "black"),
+        axis.title.x = element_text(size = 22, color = "black"),
+        axis.text.x = element_text(size = 22 , color = "black"),
+        axis.title.y = element_text(size = 22, color = "black" ),
+        axis.text.y = element_text(size = 22, color = "black"),
+        strip.background = element_blank(),                 # Remove box
+        strip.text = element_text(size = 22, color = "black"),  #
+        panel.spacing = unit(1.5 , "lines"))  +
+  facet_grid(rows = vars(gene), cols =vars(patient)
+             , scales = "free"
+             )
+
+ggsave(file.path(plot_path, "Figure_Sup_9B_LinePlot_Receptor_expression.pdf" ),width=13,height= 10)
+
+
+write.table(summary_by_cluster , file.path(figures_data,"Figure_Sup_9B_LinePlot_Receptor_expression.txt" ), sep = "\t", quote = F)
+
+```
+
+
+
+```{r}
+sessionInfo()
+```
+

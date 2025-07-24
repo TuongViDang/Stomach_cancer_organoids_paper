@@ -1,0 +1,566 @@
+---
+title: "Stomach cancer paper Figure 2 ABC"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r }
+# Load libraries
+library(Seurat)
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(patchwork)
+library(RColorBrewer)
+library(factoextra)
+library(pheatmap)
+library(ggplot2)
+library(ggforce)
+library(ggrepel)
+library(ggvenn)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+library(DESeq2)
+```
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data")
+dir.create(figures_data)
+```
+# Load data and edit sample meta data 
+```{r }
+# Load seurat object containing data from all 9 samples integrated and clustered (for pseudobulk DE later)
+seurat_integrated <- readRDS(file.path(rds_path,'clustered_0.35_integrated_seurat_ref.rds'))
+seurat_integrated
+```
+
+```{r }
+#Edit the meta data
+seurat_integrated$patient<- str_extract(seurat_integrated$orig.ident,"^[^[_-]]*")
+seurat_integrated$treatment<-str_extract(seurat_integrated$orig.ident,"[^-]*$")
+meta <- seurat_integrated@meta.data
+meta <- meta %>%
+  mutate(sample = case_when(
+    grepl("-no", orig.ident) ~ sub("-no", " Untreated", orig.ident),
+    grepl("-vitro", orig.ident) ~ sub("-vitro", " Ex vivo", orig.ident),
+    grepl("-vivo", orig.ident) ~ sub("-vivo", " In vivo", orig.ident),
+    TRUE ~ orig.ident
+  ), 
+   Treatment = case_when(
+    treatment == "no" ~ "Untreated",
+    treatment == "vitro" ~ "Ex vivo",
+    treatment == "vivo" ~ "In vivo"
+   ))
+seurat_integrated@meta.data <- meta
+```
+
+# Transcriptomic dissimilarity
+## Aggregate read counts per sample and calculate transcriptomic dissimilarity
+```{r }
+#Transform to SCE for bulk analysis
+DefaultAssay(seurat_integrated) <-'RNA'
+counts_matrix <- GetAssayData(object = seurat_integrated, slot = "counts")
+coldata <- seurat_integrated@meta.data
+#umap_embeddings<-Embeddings(object = seurat_integrated, reduction = "umap")
+
+sce <- SingleCellExperiment(assays = list(counts=counts_matrix), colData=coldata)
+#reduceDim(sce,"umap")<-umap_embeddings
+
+
+summed <- aggregateAcrossCells(sce, id=colData(sce)[,"sample"])
+
+#Draw the transcriptomic dissimilarity 
+bulk_df <- as.data.frame(assay(summed,"counts"))
+
+dist_matrix  <- 1- cor(bulk_df,method="spearman")
+
+dist_matrix_bis <- dist_matrix * 100
+clean_dmat <- as.data.frame(rbind(dist_matrix_bis[3,1:2],
+                      dist_matrix_bis[6,4:5],
+                      dist_matrix_bis[9,7:8]))
+
+rownames(clean_dmat)<-c("OO100","OO77","OO99")
+colnames(clean_dmat)<-c("untreated_vs_in_vitro","untreated_vs_in_vivo")
+clean_dmat$patient <-rownames(clean_dmat)
+clean_dmat_long <- clean_dmat%>%pivot_longer(cols=c(1:2),names_to="treatment",values_to="distance")
+clean_dmat_long$patient <- factor(clean_dmat_long$patient , levels = c("OO77","OO99","OO100"))
+```
+
+## Figure 2A: Transcriptomic dissimilarity
+```{r fig.width = 4.5,   fig.height = 4.5 }
+colors = c( "goldenrod3", "darkcyan","indianred1","tomato", "violet")
+
+plot <- ggplot(clean_dmat_long, aes(x=treatment, y=distance, group=patient)) +
+  geom_point(aes(colour = treatment),size= 2, position=position_dodge(width=0)) +
+  geom_line( aes(colour = patient), linewidth= 2, alpha=0.5, position=position_dodge(width=0)) +
+  scale_x_discrete(labels = c("untreated_vs_in_vitro" = " Ex vivo", "untreated_vs_in_vivo" = "In vivo")) +
+  scale_colour_manual(values = colors)+
+  ylim(0,8)+
+  ylab("Transcriptomic dissimilarity") +
+  #+geom_text(aes(label = patient), vjust = -0.3, position = position_dodge(width = 0.55),size= 5) +
+  theme_classic()+
+  theme(legend.position = "none",
+        axis.title.x.bottom=element_blank(),
+        axis.text.x.bottom=element_text(size= 16),
+        axis.title.y.left=element_text(size= 19),
+         axis.text.y.left=element_text(size= 16))
+plot
+ggsave("Figure_2A_Transcriptomic_dissimilarity.pdf",path= plot_path,width= 6.5,height= 6.5)
+
+
+#Save data for this Figure
+data = plot$data
+head(data)
+write.table(data , file.path(figures_data, "Figure_2A_Transcriptomic_dissimilarity.txt"), sep = "\t", quote = F)
+```
+
+# Differential expression analysis *ex vivo* and *in vivo* samples compared to untreated samples
+## Function to perform pseudobulk DE analysis
+```{r }
+######### Pseudobulk using SCE and cluster of 3 patients
+DE_and_FA <- function(patient){
+    patient_name = patient
+    seurat = subset(seurat_integrated , subset = patient == patient_name)
+
+    DefaultAssay(seurat) <- 'RNA'
+    counts_matrix <- GetAssayData(object = seurat, slot = "counts")
+    coldata <- seurat@meta.data
+    #umap_embeddings<-Embeddings(object = seurat_integrated, reduction = "umap")
+
+    sce <- SingleCellExperiment(assays = list(counts=counts_matrix), colData=coldata)
+    #reduceDim(sce,"umap")<-umap_embeddings
+
+    #Aggregate count 
+    summed <- aggregateAcrossCells(sce, id=colData(sce)[,c("seurat_clusters","treatment")])
+    meta <- colData(summed)  %>% as.data.frame %>% mutate(seurat_clusters = as.character(seurat_clusters))%>%
+    mutate(sample_id = paste(orig.ident, seurat_clusters,sep="_"))
+
+    dds <- DESeqDataSetFromMatrix(countData = counts(summed), colData = meta, design = ~ seurat_clusters + treatment)
+
+    # Transform counts for data visualization
+    rld <- rlog(dds, blind=TRUE)
+
+    # Run DESeq2 differential expression analysis
+    dds <- DESeq(dds)
+
+    
+    rld <- rlog(dds, blind=TRUE)
+    rld_mat <- assay(rld)
+    rld_cor <- cor(rld_mat)   
+    rownames(rld_cor) <- meta$sample_id
+    colnames(rld_cor) <- meta$sample_id
+
+    #reorder the sample
+    meta_reorder <- meta %>% arrange(treatment)
+    rld_cor_reorder <- rld_cor[meta_reorder$sample_id, meta_reorder$sample_id]
+    anno = as.data.frame(meta_reorder[,"treatment"])
+    colnames(anno) = c("treatment")
+    rownames(anno) = rownames(rld_cor_reorder)
+
+    ## Define contrasts, extract results table, and shrink the log2 fold changes
+    ##vitro
+    contrast_vitro <- c("treatment", "vitro", "no")
+
+    res_table_vitro_unshrunken <- results(dds, contrast=contrast_vitro, alpha = 0.05)
+
+    res_table_vitro <- lfcShrink(dds, contrast=contrast_vitro, res=res_table_vitro_unshrunken,type="normal")
+
+    # Turn the results object into a data frame
+    res_vitro_df <- data.frame(res_table_vitro)
+      #Save this table
+    write.table(res_vitro_df,file.path(txt_files,paste0(patient,"_res_vitro_df.txt" )), sep = "\t", quote = F)
+
+    # Subset the significant results
+    padj.cutoff = 0.05
+    lfc.cutoff= 1
+    sig_vitro_res <- filter(res_vitro_df, padj < padj.cutoff & abs(log2FoldChange) > lfc.cutoff) %>% arrange(desc(log2FoldChange )) %>% tibble::rownames_to_column(var="gene")
+
+    
+   ##vivo
+    contrast_vivo <- c("treatment", "vivo", "no")
+
+    res_table_vivo_unshrunken <- results(dds, contrast=contrast_vivo, alpha = 0.05)
+
+    res_table_vivo <- lfcShrink(dds, contrast=contrast_vivo, res=res_table_vivo_unshrunken,type="normal")
+
+   # Turn the results object into a data frame
+    res_vivo_df <- data.frame(res_table_vivo)
+   #Save this table
+    write.table(res_vivo_df,file.path(txt_files,paste0(patient,"_res_vivo_df.txt" )), sep = "\t", quote = F)
+  # Subset the significant results
+   padj.cutoff = 0.05
+   lfc.cutoff= 1
+   sig_vivo_res <- filter(res_vivo_df, padj < padj.cutoff & abs(log2FoldChange) > lfc.cutoff)  %>% arrange(desc(log2FoldChange ))  %>% tibble::rownames_to_column(var="gene")
+
+   length(intersect(sig_vivo_res$gene, sig_vitro_res$gene))
+
+    ### Extract normalized counts for significant genes only
+
+    only_vivo_genes = setdiff(sig_vivo_res$gene,sig_vitro_res$gene)
+    all_sig_genes = c(sig_vitro_res$gene,only_vivo_genes )
+
+    normalized_counts <- counts(dds, normalized = TRUE)
+    sig_counts <- normalized_counts[rownames(normalized_counts) %in% all_sig_genes, ]
+
+    ## Set a color-blind friendly palette
+   heat_colors <- rev(brewer.pal(11, "PuOr"))
+
+   #set colnames of matrix
+    colnames(sig_counts) <- meta$sample_id
+
+    #reorder the sample
+    meta_reorder <- meta %>% arrange(treatment)
+    sig_counts_reorder <-sig_counts[all_sig_genes , meta_reorder$sample_id]
+    #use the same anno as the correlation heatmap
+
+    ## Run pheatmap using the metadata data frame for the annotation
+     anno_colors = list(treatment = c("no"="deepskyblue2", 
+                                      "vitro" = "tomato", 
+                                       "vivo" = "plum"))
+
+  for (ext in c("png", "pdf")) {
+  pheatmap(sig_counts_reorder, 
+           color = heat_colors,
+           cluster_col = FALSE, cluster_rows = FALSE, 
+           show_rownames = FALSE, show_colnames = FALSE,
+           annotation_col = anno, 
+           annotation_colors = anno_colors,
+           border_color = NA, 
+           fontsize = 14, 
+           scale = "row", 
+           filename = file.path(plot_path, paste0("Figure_Sup_2B_Heatmap_DE_genes_pseudobulk_", patient, ".", ext))) }
+
+
+  write.table(sig_counts_reorder, file.path(figures_data, paste0( "Figure_Sup_2B_Heatmap_DE_genes_", patient, ".txt")), sep = "\t", quote = F)
+
+
+  #Scatter plot
+  res_vitro_df$gene <- rownames(res_vitro_df)
+  res_vivo_df$gene <- rownames(res_vivo_df)
+  both <- dplyr::full_join(res_vitro_df,res_vivo_df,by="gene",suffix=c(".vitro",".vivo"))
+
+  sum(is.na(both$padj.vitro))
+  both$padj.vitro[is.na(both$padj.vitro)]=1
+  sum(is.na(both$padj.vitro))
+
+  sum(is.na(both$padj.vivo))
+  both$padj.vivo[is.na(both$padj.vivo)]=1
+  sum(is.na(both$padj.vivo))
+
+  sum(is.na(both$log2FoldChange.vitro))
+  both$log2FoldChange.vitro[is.na(both$log2FoldChange.vitro)]=0
+  sum(is.na(both$log2FoldChange.vitro))
+
+  sum(is.na(both$log2FoldChange.vivo))
+  both$log2FoldChange.vivo[is.na(both$log2FoldChange.vivo)]=0
+  sum(is.na(both$log2FoldChange.vivo))
+
+  both<-both%>%
+          mutate(vitro_sig=ifelse(padj.vitro <= 0.05 & abs(log2FoldChange.vitro) >= 1 ,"yes","no"), 
+                vivo_sig=ifelse(padj.vivo <= 0.05 & abs(log2FoldChange.vivo) >= 1,"yes","no"))%>%
+                mutate(sig=case_when(
+                vitro_sig=="yes" & vivo_sig=="yes" ~ 'both',
+                vitro_sig=='yes' & vivo_sig=='no' ~ 'vitro',
+                vitro_sig=='no' & vivo_sig=='yes' ~ 'vivo',
+                TRUE~'none'))
+  correlation_value <- cor(both$log2FoldChange.vitro, both$log2FoldChange.vivo)
+
+  both %>% ggplot(aes(x=log2FoldChange.vitro,y=log2FoldChange.vivo))+
+          geom_point(aes(color=sig),size= 1.5 )+
+          scale_colour_manual(labels=c("both"="both","none"="none","vitro"="ex vivo","vivo"="in vivo"),
+                        values=c("both"="darkseagreen1","none"="grey","vitro"="coral1","vivo"="plum"),name="DE")+
+           scale_x_continuous(limits=c(-5,5))+
+           scale_y_continuous(limits=c(-12,10))+
+           geom_text(x = 5,y = 9.5,label = paste("r=", round(correlation_value, 4)), hjust = 1,vjust = 0, size= 7.5,  fontface ="plain")+
+           theme_classic()+  
+           ylab("LogFC In vivo vs Untreated")+
+           xlab("LogFC Ex vivo vs Untreated")+
+          theme(axis.title.x.bottom=element_text(size=22, color = "black"),
+                axis.text.x.bottom=element_text(size=22, color = "black"),
+                axis.title.y.left=element_text(size=22, color = "black"),
+                axis.text.y.left = element_text(size=22, color = "black"),
+                legend.position = "None")
+  
+  ggsave(paste0("Figure_Sup_2A_pseudobulk_Deseq2_scatter_",patient,".pdf"),path=plot_path,width=5,height=5)
+
+  write.table(both, file.path(figures_data, paste0("Figure_Sup_2A_ScatterPlot_Log2FC_", patient, ".txt")), sep = "\t", quote = F)}
+
+patients = c("OO100","OO99","OO77")
+all_results =  purrr::map_dfr(patients, DE_and_FA)
+
+```
+## Gene set overrepresentative analysis
+
+```{r }
+
+#GO analysis 
+
+Perform_GO_patient <- function(patient){
+ DefaultAssay(seurat_integrated)<-"RNA"
+ All_genes<- AnnotationDbi::mapIds(org.Hs.eg.db,keys=rownames(seurat_integrated),keytype='SYMBOL',column=c('ENSEMBL'),muliVals=first)
+ All_genes<-All_genes[!(is.na(All_genes))]
+
+
+ H<-msigdbr(species = 'Homo sapiens',category='H')
+ H.ensemble<-H%>%dplyr::select(gs_name,ensembl_gene)
+
+ #Function to perform GO with Hallmark and return name of gene set
+ perform_GO <- function(genes, universe_genes) {
+  enriched_genes <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = genes, keytype = 'SYMBOL', column = 'ENSEMBL', multiVals = 'first')
+  enriched_genes <- enriched_genes[!is.na(enriched_genes)]
+  enrich_H <- enricher(enriched_genes, universe = All_genes,TERM2GENE = H.ensemble )
+  enrich_H_df <- enrich_H@result %>%  filter(p.adjust <= 0.01) 
+  enrich_H_df<-enrich_H_df %>% mutate(Description = gsub("HALLMARK_", "", Description))
+  return(enrich_H_df) }
+
+padj.cutoff = 0.05
+lfc.cutoff= 0.5  #0.75
+#vitro
+res_vitro_df = read.delim(file.path(txt_files,paste0(patient,"_res_vitro_df.txt" )))
+# Subset the significant results
+
+sig_vitro_res <- filter(res_vitro_df, padj < padj.cutoff & abs(log2FoldChange) > lfc.cutoff)  %>% arrange(desc(log2FoldChange ))  %>% tibble::rownames_to_column(var="gene")
+
+
+vitro_up_genes = sig_vitro_res %>% filter(log2FoldChange > 0) %>% pull(gene)
+GO_vitro_up = perform_GO(vitro_up_genes , universe_genes = All_genes)
+if(nrow(GO_vitro_up) > 0) {
+  GO_vitro_up$Direction = "Up"} else {GO_vitro_up$Direction <- character() }
+
+vitro_down_genes = sig_vitro_res %>% filter(log2FoldChange < 0) %>% pull(gene)
+GO_vitro_down = perform_GO(vitro_down_genes , universe_genes = All_genes)
+
+if(nrow(GO_vitro_down) > 0) {
+  GO_vitro_down$Direction = "Down"} else {GO_vitro_down$Direction <- character() }
+GO_vitro = rbind(GO_vitro_up, GO_vitro_down)
+GO_vitro$Comparison = "Ex"
+
+#vivo
+res_vivo_df = read.delim(file.path(txt_files,paste0(patient,"_res_vivo_df.txt" )))
+sig_vivo_res <- filter(res_vivo_df, padj < padj.cutoff & abs(log2FoldChange) > lfc.cutoff)  %>% arrange(desc(log2FoldChange ))  %>% tibble::rownames_to_column(var="gene")
+
+vivo_up_genes = sig_vivo_res %>% filter(log2FoldChange > 0) %>% pull(gene)
+GO_vivo_up = perform_GO (vivo_up_genes , universe_genes = All_genes)
+
+if(nrow(GO_vivo_up) > 0) {
+  GO_vivo_up$Direction = "Up"} else {GO_vivo_up$Direction <- character() }
+vivo_down_genes = sig_vivo_res %>% filter(log2FoldChange < 0) %>% pull(gene)
+
+vivo_down_genes = sig_vivo_res %>% filter(log2FoldChange < 0) %>% pull(gene)
+GO_vivo_down = perform_GO(vivo_down_genes , universe_genes = All_genes)
+
+if(nrow(GO_vivo_down) > 0) {
+  GO_vivo_down$Direction = "Down"} else {GO_vivo_down$Direction <- character() }
+GO_vivo = rbind(GO_vivo_up, GO_vivo_down)
+GO_vivo$Comparison = "In"
+
+GO_patient = rbind(GO_vitro, GO_vivo)
+GO_patient$patient = patient
+
+GO_patient}
+
+
+patients = c("OO100","OO99","OO77")
+GO_results <- purrr::map_dfr(patients, Perform_GO_patient)
+GO_results$ID <- sub("HALLMARK_","", GO_results$ID )
+GO_results$neg_log_adj_p <- -log10(GO_results$p.adjust)
+GO_results$comparision_ID <- paste(GO_results$patient, GO_results$Comparison)
+
+ordered_com = c(  "OO77 Ex", "OO99 Ex","OO100 Ex",  "OO77 In", "OO99 In","OO100 In"  )
+GO_ordered_pathway = c(  "TNFA_SIGNALING_VIA_NFKB",  "HYPOXIA"      ,"INTERFERON_ALPHA_RESPONSE" , 
+                          "UV_RESPONSE_UP" , 
+                          "APOPTOSIS"        ,  "P53_PATHWAY"  ,   "INTERFERON_GAMMA_RESPONSE"  , "ESTROGEN_RESPONSE_EARLY" , "CHOLESTEROL_HOMEOSTASIS",  "APICAL_JUNCTION"   , 
+                          "KRAS_SIGNALING_UP"  , "EPITHELIAL_MESENCHYMAL_TRANSITION" ,             
+                          "ESTROGEN_RESPONSE_LATE",  "GLYCOLYSIS","XENOBIOTIC_METABOLISM", 
+                     "MYOGENESIS",    "COMPLEMENT"  ,  "MTORC1_SIGNALING"  , "MITOTIC_SPINDLE","E2F_TARGETS"  , "G2M_CHECKPOINT"   )
+
+GO_results$ID <- factor(GO_results$ID , levels = rev(GO_ordered_pathway))
+
+GO_results$comparision_ID <- factor(GO_results$comparision_ID , levels = ordered_com)
+```
+
+## Figure 2B: Bubble plot of GO term 
+```{r fig.width = 12,   fig.height = 8 }
+plot  <-  ggplot(GO_results, aes(x = comparision_ID, y = ID, color = Direction , size = neg_log_adj_p)) +
+  geom_point(alpha = 1, stroke = 1.3) + 
+  scale_color_manual(values = c( "#313695", "#A50026"))+
+      labs(size = "-log10(p.adjust)") + 
+  theme_bw()+
+  theme(axis.title.x.bottom=element_blank(),
+        axis.text.x.bottom=element_text(size = 18, color = "black"),
+        axis.title.y.left=element_blank(),
+        axis.text.y.left = element_text(size = 18, color = "black"),
+        legend.position = "top",
+        legend.text = element_text(size = 18),
+        legend.title = element_text(size = 18), 
+        legend.box = "vertical",            # Stack legends vertically
+        legend.box.just = "left" ,
+        legend.spacing.y = unit(2, "pt")         
+  ) +
+  guides(
+    color = guide_legend(nrow = 1),
+    size = guide_legend(nrow = 1)
+  )
+
+plot
+ggsave(filename=file.path(plot_path,paste("Figure_2B_Bubble_GO_DE_BublePlot.pdf")),width= 11,height= 8)
+
+#Save data
+data <- plot$data
+
+write.table(data, file.path(figures_data, "Figure_2B_GO_DE_BublePlot.txt"), sep = "\t", quote = F)
+
+```
+
+# Genes in NFkB pathway that exhibit consistent trend across 3 patients 
+
+```{r }
+#Combined vivo res table of 3 patient
+OO77 = read.delim(file.path(txt_files,"OO77_res_vivo_df.txt" )) 
+OO77$patient = "OO77"
+OO77$gene = rownames(OO77)
+OO77_sig = OO77 %>% filter(padj< 0.05, abs(log2FoldChange)> 0.5)
+OO77_up = OO77_sig %>% filter(log2FoldChange > 0) %>% rownames()
+OO77_down = OO77_sig %>% filter(log2FoldChange < 0) %>% rownames()
+
+OO99 = read.delim(file.path(txt_files,"OO99_res_vivo_df.txt" )) 
+OO99$patient = "OO99"
+OO99$gene = rownames(OO99)
+OO99_sig = OO99 %>% filter(padj< 0.05, abs(log2FoldChange)> 0.5)
+OO99_up = OO99_sig %>% filter(log2FoldChange > 0) %>% rownames()
+OO99_down = OO99_sig %>% filter(log2FoldChange < 0) %>% rownames()
+
+OO100 = read.delim(file.path(txt_files,"OO100_res_vivo_df.txt" )) 
+OO100$patient = "OO100"
+OO100$gene = rownames(OO100)
+OO100_sig = OO100 %>% filter(padj< 0.05, abs(log2FoldChange)> 0.5)
+OO100_up = OO100_sig %>% filter(log2FoldChange > 0) %>% rownames()
+OO100_down = OO100_sig %>% filter(log2FoldChange < 0) %>% rownames()
+
+All = rbind(OO77,OO99,OO100)
+
+#Retrieve gene names
+Hallmark_df <- read.delim("/group/poetsch_projects/poetsch_sc/Driver_predict/cancer_gene_lists/h.all.v2023.2.Hs.symbols.gmt")
+Hallmark_df[,1] <- sub("HALLMARK_","",Hallmark_df[,1] )
+
+pathway = "TNFA_SIGNALING_VIA_NFKB" 
+genes_pathway = Hallmark_df[Hallmark_df[1]== pathway,3:ncol(Hallmark_df)] %>% as.vector()  %>% unlist() %>% as.character()
+OO77_up_pathways = intersect(OO77_up ,genes_pathway )
+OO99_up_pathways = intersect(OO99_up , genes_pathway )
+OO100_up_pathways = intersect(OO100_up , genes_pathway )
+
+OO77_down_pathways = intersect(OO77_down ,genes_pathway )
+OO99_down_pathways = intersect(OO99_down , genes_pathway )
+OO100_down_pathways = intersect(OO100_down , genes_pathway )
+
+up_intersect = intersect(OO77_up_pathways ,intersect(OO99_up_pathways , OO100_up_pathways))
+down_intersect = intersect(OO77_down_pathways ,intersect(OO99_down_pathways , OO100_down_pathways))
+
+intersect = union(up_intersect , down_intersect ) 
+
+
+# Extract gene expression from single cell data
+seurat_sub = subset(seurat_integrated, subset = orig.ident %in% c("OO100-no","OO100-vivo","OO99-no","OO99-vivo","OO77-no","OO77-vivo"))
+DefaultAssay(seurat_sub) = "RNA"
+options(future.globals.maxSize = 6 * 1024^3)
+seurat_sub = SCTransform(seurat_sub,vst.flavor='v1',
+                          variable.features.n = nrow(seurat_sub))
+
+
+seurat_sub$patient = factor(seurat_sub$patient, levels = c("OO77", "OO99","OO100"))
+seurat_sub@meta.data = seurat_sub@meta.data %>% arrange(patient)
+
+expression_mat = seurat_sub$SCT$scale.data
+expression_intersect = expression_mat[intersect,rownames(seurat_sub@meta.data )]
+
+meta = seurat_sub@meta.data
+meta = meta %>% mutate(Treatment = case_when(treatment == "no" ~ "Untreated",
+                                            treatment == "vitro" ~ "Ex vivo",
+                                            treatment == "vivo" ~ 'In vivo'))
+meta = meta %>% mutate(sample = paste(patient, treatment))                                           
+seurat_sub@meta.data = meta
+rownames(seurat_sub@meta.data) = rownames(meta)
+
+anno_cell = seurat_sub@meta.data[,"Treatment",drop= F]
+
+pathways_color = brewer.pal(4, "Set3")
+annotation_colors <- list( Treatment = c("Untreated" = "deepskyblue2", "In vivo" = "violet"))
+
+
+# Arrange gene by gene expression gap In vivo vs Untreated
+expression_intersect_bis <- as.data.frame(t(expression_intersect) )
+expression_intersect_bis$CB <- rownames(expression_intersect_bis)
+meta$CB = rownames(meta)
+expression_intersect_bis <- expression_intersect_bis %>% left_join(meta[,c("CB","patient","Treatment")], by = "CB")
+expression_intersect_bis <- expression_intersect_bis %>% pivot_longer(cols = 1:15, values_to = "expression", names_to = "gene")
+expression_intersect_bis <- expression_intersect_bis %>% group_by(gene, Treatment) %>% 
+                             summarize(mean =  mean(expression)) %>%
+                             pivot_wider(names_from = "Treatment", values_from = "mean") %>%
+                             mutate(gap = Untreated - `In vivo`) %>%
+                             arrange(desc(gap))
+
+gene_order = expression_intersect_bis %>% pull(gene)
+expression_intersect = expression_intersect[gene_order,]
+```
+
+## Figure 2C: Heatmap of single cell gene expression of common genes in NFKb pathway
+```{r }
+pheatmap::pheatmap(expression_intersect, 
+                   color =  colorRampPalette(rev(brewer.pal(11, "RdYlBu")))(100),
+                   show_rownames = TRUE, 
+                   show_colnames = FALSE,   
+                   breaks = seq(-1, 1, length.out = 101),
+                   cluster_row = FALSE, 
+                   cluster_col = FALSE, 
+                   gaps_col = c( 8558 , 17879 ),
+                   annotation_col = anno_cell, 
+                   annotation_colors = annotation_colors
+                   #,filename = file.path(plot_path, "Figure_2C_Heatmap_common_gene_NFkb.png"),width = 7.5, height = 3.7
+                   )
+
+write.table(expression_intersect, file.path(figures_data ,"Figure_2C_Heatmap_common_genes_NFKB.txt"), sep = "\'t", quote = F)
+```
+
+```{r include = FALSE}
+gap_vector <- expression_intersect_bis$gap
+names(gap_vector) <- expression_intersect_bis$gene
+
+gap_df <- tibble(gene = names(gap_vector),
+                 gap = gap_vector) %>%
+          mutate(gene = factor(gene, levels = rev(gene))) 
+
+
+# Triangle shape by using geom_area
+gap_df$id <- seq_along(gap_vector)
+triangle_plot <- ggplot(gap_df, aes(x = gap, y = id)) +
+  geom_area(fill = "gray") +
+  scale_y_reverse(breaks = NULL) +
+  theme_void()
+
+ggsave(file.path(plot_path, "Figure_2C_Triangle.pdf"), width = 0.5,  height = 3.7)
+```
+```{r}
+sessionInfo()
+```

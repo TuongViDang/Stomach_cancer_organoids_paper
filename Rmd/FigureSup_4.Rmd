@@ -1,0 +1,376 @@
+---
+title: "Stomach cancer paper FigSup 4 patient OO77"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+```{r }
+library(tidyverse)
+library(pheatmap)
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(magick)
+```
+
+Bulk WGS-deconvoluted cancer evolution tree  for patient OO77 (done with Conipher): 
+```{r my_image, echo=FALSE, out.width="150%"}
+knitr::include_graphics("/group/poetsch_projects/poetsch_sc/Stomach_paper_repository/Notebooks/Images/OO77_tree.jpeg")
+knitr::include_graphics("/group/poetsch_projects/poetsch_sc/Stomach_paper_repository/Notebooks/Images/OO77_evolution.jpeg")
+```
+
+Tree structure
+
+```{r}
+# Parent-child hierarchical relationships for each branch
+tree_list <- list(
+  B1 = c(2),
+  B2 = c(3, 4),
+  B3 = c(3, 5),
+  B4 = c(3,6,7,8)
+)
+
+# Function to generate parent-child pairs for each branch
+generate_tree_pairs <- function(branch_name, nodes) {
+  expand.grid(Parent = nodes[-length(nodes)], Child = nodes[-1]) %>%
+    filter(Parent < Child) %>%  # Ensures proper hierarchy
+    mutate(Branch = branch_name)
+}
+
+# Apply function to all branches
+tree_table <- map2_df(names(tree_list), tree_list, generate_tree_pairs)
+head(tree_table)
+```
+
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data")
+dir.create(figures_data)
+```
+
+# Clone asignment single cell RNA-seq 
+```{r}
+# Load the mutation detected in single cell of scRNA-seq (done with scReadCount and SCOMATIC) 
+patient="OO77"
+Combined_all = read.table(file.path(txt_files,paste0(patient,"_Combined_all.txt")))
+head(Combined_all)
+
+
+# Load assigned single cell RNA-seq 
+seurat_patient = readRDS(file.path(rds_path,paste0(patient,"_three_samples_raw_Clones.rds")))
+clones_list_all =   c( "2", "4","5","6", "7" ,"8", "UnI")
+seurat_patient@meta.data$treatment = factor(seurat_patient@meta.data$treatment , levels = c("Untreated", "Ex vivo", "In vivo"))
+seurat_patient@meta.data$Clone = factor(seurat_patient@meta.data$Clone, levels = clones_list_all)
+```
+## UMAP by Treatment
+```{r  fig.width= 8, fig.height= 6}
+colors = c("cadetblue2", "tomato","plum")
+plot <- DimPlot(seurat_patient, group.by= "treatment", cols = colors ) + labs(title = patient) + theme_void()
+plot
+ggsave(file.path(plot_path,paste0("Figure_Sup_4A_Dimplot_by_sample_",patient,".pdf")),width = 10, height= 8)
+```
+
+```{r }
+#Save data of Plot Sup 4A
+data = plot$data 
+all(rownames(data) == rownames(seurat_patient@meta.data))
+
+#Combine with Clone information
+data = cbind(data, Clone = seurat_patient@meta.data$Clone)
+
+write.table(data, file.path(figures_data, paste0("Figure_Sup_4A_initial_mapping_Clones_to_scRNA_",patient ,".txt")), sep = "\t", quote = F)
+
+```
+
+
+## UMAP by Clone labels
+```{r  fig.width= 8, fig.height= 6}
+# Define colors for clones and NA cells
+clone_colors <- c(`2` = "lightgreen", `4` =  "lightpink",`5` = "dodgerblue4", 
+  `6` = "mediumseagreen",`7` = "plum", `8` = "lightgoldenrod1", `UnI` = "gray92"  # Color for NA cells
+)
+
+# Extract UMAP embeddings and clone information
+p <-  DimPlot(seurat_patient, reduction = "umap", group.by = "Clone") + theme_minimal()
+plot_data <- p$data
+# Convert `Clone` to factor and ensure `NA` is handled properly
+plot_data$Clone <- factor(plot_data$Clone, levels =  clones_list_all)
+
+# Plotting
+ggplot(plot_data, aes(x = umap_1, y = umap_2, color = Clone)) +
+  # First layer: NA cells in background (gray)
+  geom_point(data = subset(plot_data, Clone == "UnI"), size = 0.5) +
+  geom_point(data = subset(plot_data, Clone == "2"), size = 0.75) +
+  geom_point(data = subset(plot_data, Clone == "4"), size = 0.75) +
+  geom_point(data = subset(plot_data, Clone == "5"), size = 0.75) +
+  geom_point(data = subset(plot_data, Clone == "6"), size = 0.75) +
+  geom_point(data = subset(plot_data, Clone == "7"), size = 0.75) +
+  geom_point(data = subset(plot_data, Clone == "8"), size = 0.75) +
+  # Manual color scale for specific clone colors
+  scale_color_manual(values = clone_colors)+
+  guides(color = guide_legend(reverse = TRUE))+
+   theme(
+    legend.position = "right",
+    legend.text = element_text(size = 14),        # Increase legend text size
+    legend.title = element_text(size = 16),       # Increase legend title size (if used)
+    legend.key.size = unit(10, "cm")             # Increase size of legend keys
+  ) +
+  theme_void()
+  
+ggsave(file.path(plot_path,paste0("Figure_Sup_4A_mapping_Clones_to_scRNA_raw_",patient,".pdf")),width = 10, height= 8)
+```
+
+# Co-occurance of mutation of the same clone/branch and cell clone/branch purity
+## Mutation-cell matrix 
+```{r}
+#Only genotyped cells
+#Extract cells with known clones and ncell > 3 
+clones_list =  c( "2", "4","5","6", "7" ,"8")
+seurat_patient_sub = subset(seurat_patient , subset = Clone %in% clones_list)
+seurat_patient_sub@meta.data$Clone = factor(seurat_patient_sub@meta.data$Clone, levels = clones_list)
+
+clone_colors <- c(`2` = "lightgreen", `4` = "lightpink",`5` =  "dodgerblue4" , 
+                 `6` = "mediumseagreen",`7` = "plum", `8` = "lightgoldenrod1")
+
+
+#Mutation_matrix
+combined_filtered = Combined_all %>% filter(mutated == TRUE, treeCLUSTER %in% clones_list)  %>% distinct(mutation_id, CB_seurat, .keep_all= T)
+mutation_matrix <- as.matrix(table(combined_filtered$mutation_id, combined_filtered$CB_seurat))
+dim(mutation_matrix)
+#prepare the mutation meta and cell meta
+#Rearrange mutation_matrix by mutation Clones and cell clones to plot heatmap
+
+#mutation
+Mutation_id_meta = data.frame(mutation_id = rownames(mutation_matrix)) %>% left_join(combined_filtered[,c("mutation_id","treeCLUSTER")] %>% distinct(mutation_id, .keep_all=TRUE), by ="mutation_id")
+Mutation_id_meta$Clone= factor(Mutation_id_meta$treeCLUSTER , levels = clones_list ) 
+Mutation_id_meta = Mutation_id_meta %>% arrange(Clone)
+anno_mut = data.frame(Clone = Mutation_id_meta$Clone)
+rownames(anno_mut) = Mutation_id_meta$mutation_id
+dim(anno_mut)
+#cell
+Cell_meta =  data.frame( CB_seurat = colnames(mutation_matrix)) %>% left_join(seurat_patient_sub@meta.data[,c( "CB_seurat" , "Clone")], by = "CB_seurat")
+Cell_meta = Cell_meta %>% filter(!(is.na(Clone)))
+Cell_meta$Clone = factor(Cell_meta$Clone , levels = clones_list )
+Cell_meta = Cell_meta %>% arrange(Clone)
+anno_cell = data.frame(Clone = Cell_meta$Clone)
+rownames(anno_cell) =  Cell_meta$CB_seurat
+dim(anno_cell)
+#rearrange mutation_matrix based on mutation meta and cell meta
+mutation_matrix = mutation_matrix[Mutation_id_meta$mutation_id,Cell_meta$CB_seurat]
+
+#Sort: 
+# mutation in each clone by ranking of mutation frequency across all cells
+# cell in each cell clone by the first mutation hit based on mutation ranking
+
+# Step 1: Identify groups
+row_groups <- split(rownames(mutation_matrix), anno_mut[rownames(mutation_matrix), "Clone"])
+col_groups <- split(colnames(mutation_matrix), anno_cell[colnames(mutation_matrix), "Clone"])
+# Step 2: Initialize final row and column orders
+row_order_final <- c()
+col_order_final <- c()
+# Step 3: Sort rows and columns *within* each group
+for (rgroup in names(row_groups)) {
+  row_ids <- row_groups[[rgroup]]
+  submat_rows <- mutation_matrix[row_ids, , drop = FALSE]
+  # Order rows by descending row sum
+  row_sums <- rowSums(submat_rows)
+  ordered_rows <- row_ids[order(-row_sums)]
+  row_order_final <- c(row_order_final, ordered_rows)
+}
+# Now reorder the matrix rows before working on columns
+mutation_matrix_temp <- mutation_matrix[row_order_final, ]
+for (cgroup in names(col_groups)) {
+  col_ids <- col_groups[[cgroup]]
+  submat_cols <- mutation_matrix_temp[, col_ids, drop = FALSE]
+  # Order columns by the index of the first 1 (per column)
+  first_hits <- apply(submat_cols, 2, function(x) match(1, x))
+  first_hits[is.na(first_hits)] <- nrow(submat_cols) + 1
+  ordered_cols <- col_ids[order(first_hits)]
+  col_order_final <- c(col_order_final, ordered_cols)
+}
+# Step 4: Apply the ordered rows and columns
+mutation_matrix_ordered <- mutation_matrix[row_order_final, col_order_final]
+anno_mut_ordered <- anno_mut[row_order_final, , drop = FALSE]
+anno_cell_ordered <- anno_cell[col_order_final, , drop = FALSE]
+
+
+Clone_colors = list(Clone = clone_colors)
+
+
+#gap for row and col
+table(anno_mut$Clone)
+rows_gap = c(sum(table(anno_mut$Clone)[1]), 
+             sum(table(anno_mut$Clone)[1:2]),
+             sum(table(anno_mut$Clone)[1:3] ))
+
+table(anno_cell$Clone)
+cols_gap = c(sum(table(anno_cell$Clone)[1]), 
+             sum(table(anno_cell$Clone)[1:2]),
+             sum(table(anno_cell$Clone)[1:3] ))
+```
+```{r  fig.width= 6, fig.height= 7}
+pheatmap(mutation_matrix_ordered, color = c("whitesmoke","red"),
+        cluster_rows = F, cluster_cols = F,
+        show_rownames = F, show_colnames = F,
+        annotation_row = anno_mut_ordered  ,
+        annotation_col = anno_cell_ordered , annotation_colors = Clone_colors ,
+        legend_breaks = c(0, 1),
+        gaps_row = rows_gap , gaps_col = cols_gap 
+        #,filename = file.path(plot_path,paste0( "Figure_Sup_4A_mutation_matrix_raw_", patient,".Sorted.png")), width = 6,height=7,  units = "in", res = 600
+       )
+# Load the heatmap image
+heatmap_img <- image_read(file.path(plot_path, paste0( "Figure_Sup_4A_mutation_matrix_raw_", patient,".Sorted.png")), density = 600)
+# Apply Gaussian Blur
+blurred_img <- image_blur(heatmap_img, radius = 10, sigma = 1.5)
+
+# Save the blurred image
+image_write(blurred_img, path = file.path(plot_path, paste0( "Figure_Sup_4B_mutation_matrix_raw_", patient,".Sorted.Blurred.pdf")),  density = 600,format = "pdf")
+
+#Save Figures data
+write.table(mutation_matrix_ordered, file.path(figures_data, paste0( "Figure_Sup_4B_mutation_matrix_raw_", patient,".Sorted.txt")), sep = "\t", quote= F)
+write.table(anno_mut_ordered,  file.path(figures_data, paste0( "Figure_Sup_4B_mutation_matrix_annotation_mutation_raw_", patient,".Sorted.txt")), sep = "\t", quote= F)
+write.table(anno_cell_ordered,  file.path(figures_data, paste0("Figure_Sup_4B_mutation_matrix_annotation_cell_raw_", patient, ".Sorted.txt")), sep = "\t", quote= F)
+```
+
+## CLONE CELL PURITY: How depleted THE CELL CLONE of mutations of clones from separated branches
+```{r }
+cell_anno = anno_cell
+cell_anno = cell_anno %>% mutate(diff_branch_clones = case_when(Clone == 2 ~ paste(4,5,6,7,8),
+                                                                Clone == 4 ~ paste(2,5,6,7,8),
+                                                                Clone == 5 ~ paste(2,4,6,7,8),
+                                                                Clone %in% c(6,7,8) ~ paste(2,4,5))
+                                                                )
+cell_anno$Clone = as.character(cell_anno$Clone)
+rownames(mutation_matrix) <- Mutation_id_meta$mutation_id
+
+
+
+#Function to calculate Cell clone purity
+Purity_calculate <- function(Clone_current){
+diff_branch_clones = cell_anno %>% filter(Clone == Clone_current) %>% pull(diff_branch_clones)%>% unique() %>% str_split(,pattern = " ") %>% unlist() 
+CB_clone = cell_anno %>% filter(Clone  == Clone_current)%>% rownames()
+#mutations in other  branches
+diff_branch_muts = anno_mut %>% filter(Clone %in% diff_branch_clones ) %>% rownames()
+
+mutation_matrix_clone_diff_branch = mutation_matrix[diff_branch_muts ,CB_clone]
+Nb_contaminated_cells = sum(colSums(mutation_matrix_clone_diff_branch) > 0 )
+Purity = 1 - Nb_contaminated_cells/length(CB_clone)
+df = data.frame(Clone = Clone_current, Purity = Purity , n_cell = length(CB_clone) )
+df
+}
+
+Purity = purrr::map_dfr( clones_list,Purity_calculate )
+Purity$Clone = factor(Purity$Clone , levels = names(clone_colors))
+
+
+# Calculate the minimum value of Purity
+min_purity <- min(Purity$Purity, na.rm = TRUE)
+```
+
+```{r  fig.width= 11, fig.height= 7}
+# Create the bar plot with a horizontal line and display the minimum value
+Purity %>% ggplot(aes(x = Clone, y = Purity, fill = Clone)) + 
+  scale_fill_manual(values = clone_colors) +
+  scale_y_continuous(limits = c(0,1.15), breaks = seq(0,1,0.2))+
+  geom_bar(stat = "identity", width = 0.5) + 
+  xlab("Cell clone")+
+  geom_text(aes(label = n_cell), vjust = -0.5, size = 11, color = "blue" ) +  # Add n_cell values as labels above bars
+  geom_hline(yintercept = min_purity, linetype = "dashed", color = "red", size = 1) +  # Add hline
+  annotate("text", x = 5, y = min_purity, label = paste("Min:", round(min_purity, 2)),
+           vjust = 2, hjust = 1.1, color = "red", size = 11) +  # Add the text annotation
+  theme_classic() +
+  theme(legend.title =  element_text(size = 32, color = "black"),
+        legend.text =  element_text(size = 32, color = "black"),
+        axis.text.y.left = element_text(size = 32, color = "black"),
+        axis.title.y.left = element_text(size = 32, color = "black"),
+        axis.title.x.bottom = element_text(size = 32, color = "black"),
+        axis.text.x.bottom = element_text(size = 32, color = "black"))
+
+# Save the plot
+ggsave( file.path(plot_path, paste0("Figure_Sup_4C_Purity_cell_clone_raw_",patient,".pdf")), width = 11, height = 5, scale =1)
+
+#save Figure data
+write.table(Purity, file.path(figures_data, paste0("Figure_Sup_4C_Purity_cell_clone_raw_", patient,".txt")), sep = "\t", quote = F)
+```
+
+
+
+## Contaminated cells of each clone (fraction of cells contain mutation from other clone)
+```{r}
+Contaminate_cell_fraction = function(clone){
+   CB_clone = anno_cell %>% filter(Clone == clone) %>% rownames()
+   mut_mat_CB_clone = mutation_matrix[,CB_clone]
+   clone_others = clones_list
+   #calculate contaminate clone
+   conta_clone_other = function(clone_other){
+        mut_clone_other = anno_mut %>% filter(Clone == clone_other) %>% rownames()
+        mut_mat_CB_clone_mut_other = mut_mat_CB_clone[mut_clone_other,]
+        Nb_contaminated_cells = sum(colSums(mut_mat_CB_clone_mut_other) > 0 )
+        fraction = 100*Nb_contaminated_cells/length(CB_clone)
+        df = data.frame(Clone = clone, Clone_other = clone_other, Fraction = fraction)
+        df
+}
+  conta_df = purrr::map_dfr(clone_others, conta_clone_other)
+  conta_df
+}
+
+
+Contaminate_cell_each_clone = purrr::map_dfr(clones_list,Contaminate_cell_fraction)
+Contaminate_cell_each_clone$Clone = factor(Contaminate_cell_each_clone$Clone , levels = clones_list)
+Contaminate_cell_each_clone$Clone_other = factor(Contaminate_cell_each_clone$Clone_other , levels = clones_list)
+```
+
+
+```{r  fig.width= 11, fig.height= 12.5}
+ggplot(Contaminate_cell_each_clone , aes(x = Clone, y = Fraction, fill = as.factor(Clone_other))) +
+  geom_bar(stat = "identity", position = "dodge") +   # Stacked bar for each clone
+  scale_y_continuous(breaks = seq(0,100,50))+
+  labs(x = "Cell Clone", y = "Fraction of cell", fill = "Clone") +
+  theme_classic() +
+  scale_fill_manual(values= clone_colors)    +      
+  theme(plot.title =   element_text(size = 32, color = "black", hjust = 0.5),
+        legend.title =  element_text(size = 32, color = "black"),
+        legend.text =  element_text(size = 32, color = "black"),
+        panel.grid.major.y = element_line(color = "grey80", size = 0.3),
+        panel.grid.minor.y = element_line(color = "grey80", size = 0.3),
+        panel.grid.major.x = element_line(color = "grey80", size = 0.3),
+        axis.text.y.left = element_text(size = 32, color = "black"),
+        axis.title.y.left = element_text(size = 32, color = "black"),
+        axis.title.x.bottom = element_text(size = 32, color = "black"),
+        axis.text.x.bottom = element_text(size = 32, color = "black"),
+        strip.text = element_text(size = 3, color = "black"),
+        strip.background = element_blank())+
+  facet_wrap(vars(Clone), ncol = 1)
+
+ggsave(file.path(plot_path,paste0( "Figure_Sup_4C_Fraction_mutation_clone_in_cell_clone_raw",patient,".pdf")), width = 11, height = 12.5, scale=1)
+
+#save Figure data
+colnames(Contaminate_cell_each_clone ) = c("Cell_clone", "Mutation_clone", "Fraction")
+write.table(Contaminate_cell_each_clone, file.path(figures_data,paste0( "Figure_Sup_4C_Fraction_mutation_clone_in_cell_clone_raw",patient,".txt")), sep = "\t", quote = F)
+
+```
+```{r}
+sessionInfo() 
+```

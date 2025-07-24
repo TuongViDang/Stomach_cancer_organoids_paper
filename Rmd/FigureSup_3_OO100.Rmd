@@ -1,0 +1,119 @@
+
+---
+title: "Stomach cancer paper Figure Sup 3"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+Bulk WGS-deconvoluted cancer evolution tree  for patient OO100 (done with Conipher): 
+```{r tree, echo=FALSE, out.width="150%"}
+knitr::include_graphics("/group/poetsch_projects/poetsch_sc/Stomach_paper_repository/Notebooks/Images/OO100_tree.jpeg")
+```
+
+
+```{r }
+# Load libraries
+library(tidyverse)
+library(ggpubr)
+```
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data")
+dir.create(figures_data)
+```
+
+# Load SigProfiler Extractor results
+```{r}
+patient="OO100"
+SBS <- read.delim(file.path( txt_files, paste0(patient,"_COSMIC_SBS96_Activities.txt")))
+SBS <- SBS %>% filter(Samples != "mutation_to_rm_filtered")
+
+keeps = which(colSums(SBS[,2:ncol(SBS)]) >0 )
+SBS <- SBS[,c("Samples",names(keeps))]
+SBS_long <- SBS %>% pivot_longer(cols=2:ncol(SBS),names_to = "Signature", values_to="Count")
+SBS_long$Samples <- gsub("_filtered","",SBS_long$Samples)
+samples_order = samples_order = c( "Clone_1" ,"Clone_14", "Clone_5" ,"Clone_7", "Clone_23","Clone_4","Clone_18","Clone_2", "Clone_19","Clone_22","Clone_6","Clone_11")
+SBS_long$Samples <- factor(SBS_long$Samples, levels= samples_order )
+table(SBS_long$Signature)
+
+
+# Calculate the proportion of each signature count per clone and total counts
+SBS_long <- SBS_long %>%
+  group_by(Samples) %>%
+  mutate(
+    Prop = Count / sum(Count),    # Proportion of each signature
+    TotalCount = sum(Count)       # Total mutation count per clone
+  ) %>%
+  ungroup()
+
+#Change name of clone
+# Define mapping for replacements
+clusterID_map <- c(`14` = 2, `5` = 3, `7` = 4, `23` = 5, `4` = 6, `18` = 7, 
+                   `2` = 8, `19` = 9, `22` = 10, `6` = 11, `11` = 12)
+# Apply transformations
+SBS_long <- SBS_long %>%
+  mutate(Samples = sub("Clone_","", Samples),
+         Clone = ifelse( Samples %in% names(clusterID_map), clusterID_map[as.character(Samples)], Samples)
+  ) %>%
+   select(Clone,Signature,Count,TotalCount, Prop ) %>% 
+   rename(Proportion = Prop) %>% arrange(Clone)
+
+
+sigs= rev(c( "SBS1",       "SBS5",   "SBS18"))
+SBS_long$Signature <- factor(SBS_long$Signature, levels= sigs)
+```
+
+# Pie chart of SBS proportion of each clone
+```{r fig.weight = 10, fig.height = 8}
+
+cols_SBS = rev(c("cadetblue3","cadetblue2","hotpink1"))
+
+ggplot(SBS_long, aes(x = "", y = Proportion, fill = Signature)) +
+  geom_bar(stat = "identity", width = 1) + 
+  coord_polar(theta = "y") +  # Convert bar to pie chart
+  facet_wrap(~ Clone, scales = "free", ncol = 3) +  # Facet to create one pie per clone
+  scale_fill_manual(values = cols_SBS) +  # Custom SBS colors
+  theme_void() +  # Remove axis and gridlines for a clean look
+  labs(title = "Pie Charts of SBS Mutation Signatures per Clone") +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "right",
+    strip.text = element_text(size = 10)
+  ) +
+  #geom_text(aes(label = round(Proportion * 100, 1)), position = position_stack(vjust = 0.5), size = 3) +  # Add labels for proportions
+  guides(fill = guide_legend(reverse = TRUE))
+
+ggsave(file.path(plot_path, paste0("Figure_Sup_3_SBS_signature_per_clone_", patient, ".pdf")), width = 10,height = 8 )
+
+
+#Save data
+write.table(SBS_long, file.path(figures_data, paste0("Figure_Sup_3_SBS_signature_per_clone_", patient, ".txt")), sep = "\t", quote = F)
+```
+
+
+```{r SBS, echo=FALSE, out.width="150%"}
+knitr::include_graphics("/group/poetsch_projects/poetsch_sc/Stomach_paper_repository/Notebooks/Images/OO100_SBS.jpeg")
+```
+
+```{r }
+sessionInfo()
+```

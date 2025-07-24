@@ -1,0 +1,660 @@
+---
+title: "Stomach cancer paper Figure 6 FigSup 7"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(fgsea)
+library(clusterProfiler)
+library(RColorBrewer)
+library(pheatmap)
+```
+
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures")
+figures_data <- file.path(main_path,"Figures_data")
+dir.create(figures_data)
+
+functions_path <- file.path(main_path,"Codes_original")
+source(file.path(functions_path,"functions.R"))
+```
+
+
+# All transcriptional clusters after integration
+```{r fig.width = 8, fig.height = 5}
+#Load file
+seurat_integrated <- readRDS(file.path(rds_path,'clustered_0.35_integrated_seurat_ref.rds'))
+
+#set color
+set3_palette <- brewer.pal(12, "Set3")[3:12]
+custom_palette <- c(  "#80B1D3", "limegreen", "#FCCDE5" ,
+                  "#FDB462","#D9D9D9", "#CCEBC5" ,
+                 "#BC80BD" , "khaki1",  "brown1")   
+
+
+Idents(seurat_integrated) = "seurat_clusters"
+plot <- DimPlot(seurat_integrated,reduction='umap',label=TRUE, label.size = 8, cols= custom_palette, raster =T, pt.size = 1.5) + theme_void()+
+       theme(legend.text = element_text(size = 17))
+plot
+ggsave(file.path(plot_path, "Figure_6A_UMAP_After_intergration_by_cluster.pdf"),width = 7,height = 4.4)
+
+#Save Figures data
+data = plot$data 
+colnames(data)[3] = "Transcriptional_cluster"
+write.table(data, file.path(figures_data, "Figure_6A_UMAP_After_intergration_by_cluster.txt"), sep = "'t", quote = F)
+
+```
+
+# Clusters distribution in each sample
+```{r fig.width = 11, fig.height = 7}
+plot_cluster_contribution_each_sample(seurat_integrated)
+ggsave( file.path(plot_path,"Figure_Sup_7B_cluster_distribution_per_sample.pdf"),width=10,height=6)
+
+data = seurat_integrated@meta.data
+data = data %>% select(Sample, seurat_clusters)
+
+write.table(data, file.path(figures_data, "Figure_Sup_7B_cluster_distribution_per_sample.txt"), sep = "\t", quote= F)
+```
+
+
+# Gene Ontology of clusters markers
+```{r}
+
+Markers_all_clusters <-read.csv(file.path(txt_files,paste0("markers_0.35_ref.txt")),sep = '\t')
+#GO ANALYSIS
+#Prepare for GO enrichment analysis
+Markers_all_clusters  <- Markers_all_clusters  %>%
+  rowwise() %>%
+  mutate(mean_log2FC = mean(c_across(contains("log2FC")), na.rm = TRUE),
+         mean_pct.1 = mean(c_across(contains("pct.1")), na.rm = TRUE)) %>%
+  ungroup()
+
+
+Markers_all_clusters_select <- Markers_all_clusters %>% 
+                              filter(mean_log2FC > 0.5 ,  mean_pct.1 > 0.5, max_pval < 0.05 ) %>% select(cluster , gene  ,description   ,mean_log2FC,max_pval )
+
+
+Markers_genes_list <- split(Markers_all_clusters_select$gene,Markers_all_clusters_select$cluster)
+sapply( Markers_genes_list, length)
+
+
+columns(org.Hs.eg.db)
+keytypes(org.Hs.eg.db)
+All_genes<- AnnotationDbi::mapIds(org.Hs.eg.db,keys=rownames(seurat_integrated),keytype='SYMBOL',column=c('ENSEMBL'),muliVals=first)
+All_genes<-All_genes[!(is.na(All_genes))]
+
+
+H<-msigdbr(species = 'Homo sapiens',category='H')
+H.ensemble<-H%>%dplyr::select(gs_name,ensembl_gene)
+
+#All cluster
+Find_GO<-function(cluster){
+  markers_genes <-AnnotationDbi::mapIds(org.Hs.eg.db,keys=Markers_genes_list[[cluster]],keytype='SYMBOL',column=c('ENSEMBL'),multiVals='first')
+  markers_genes <- markers_genes[!(is.na(markers_genes))]
+  enrich.cluster <- enricher(markers_genes,universe = All_genes,TERM2GENE = H.ensemble)
+  enrich.cluster_df = data.frame()
+  if (!(is.null(enrich.cluster ))){
+  enrich.cluster_df <-enrich.cluster@result %>% cbind(cluster_id=cluster,.)}
+  enrich.cluster_df
+}
+
+Markers_genes_list <- Markers_genes_list[c("1","2","3","4","5","6","7","8", "9")]
+enrich_GO_all_clusters<- purrr::map_dfr(names(Markers_genes_list),Find_GO)
+
+
+range(enrich_GO_all_clusters$p.adjust)
+
+
+enrich_GO_all_clusters_wide<-enrich_GO_all_clusters%>%pivot_wider(id_cols='cluster_id',
+                                                                  names_from = 'Description',
+                                                                  values_from = 'p.adjust',values_fill=1)
+nb_col = ncol(enrich_GO_all_clusters_wide)
+colnames(enrich_GO_all_clusters_wide)[2:nb_col]<-gsub("HALLMARK_","", colnames(enrich_GO_all_clusters_wide)[2:nb_col])
+colnames(enrich_GO_all_clusters_wide)[2:nb_col]<-gsub("_"," ",colnames(enrich_GO_all_clusters_wide)[2:nb_col])
+
+pathways_keep = apply(enrich_GO_all_clusters_wide[,2:nb_col],2,min) <= 0.05
+pathways_keep = c("cluster_id",names(pathways_keep[pathways_keep==TRUE]))
+enrich_GO_all_clusters_wide  = enrich_GO_all_clusters_wide[,pathways_keep] 
+
+
+
+annotation_clusters = as.data.frame(enrich_GO_all_clusters_wide[1])
+enrich_GO_all_clusters_wide = enrich_GO_all_clusters_wide[,c(2:ncol(enrich_GO_all_clusters_wide))]
+
+
+matrix<-t(enrich_GO_all_clusters_wide)
+matrix <- - log10(matrix)
+colnames(matrix)<-annotation_clusters$cluster_id
+colnames(matrix)
+rownames(matrix)
+
+cluster_order<-c('1','2','3','4','5','6','7', '8' , '9')
+
+pathways = c(  "E2F TARGETS"  , "G2M CHECKPOINT" , "DNA REPAIR",   
+              "MYC TARGETS V1","MYC TARGETS V2"  , "MITOTIC SPINDLE"   ,"SPERMATOGENESIS",  
+               "HYPOXIA"  , "INTERFERON GAMMA RESPONSE"  ,   "UV RESPONSE UP" , 
+              "IL6 JAK STAT3 SIGNALING", "INFLAMMATORY RESPONSE"  , "TNFA SIGNALING VIA NFKB"  )
+
+matrix <- matrix[pathways,cluster_order]
+```
+
+```{r fig.width = 6, fig.height = 4}
+               
+pheatmap(matrix,cluster_rows = F,
+         color = colorRampPalette(c("white",brewer.pal(n = 9, name ="Reds")[c(1,2,4,7)]))(100),
+         breaks = seq(0, 2, 0.02),
+         legend_breaks = c(0, 0.5, 1, 1.5, 2 , 2.5 ),
+         cluster_cols = F,
+         annotation_names_col = T,annotation_legend = F,show_colnames = T,fontsize = 12
+        #, filename=file.path(plot_path, "Figure_6B_GO_transcriptional_clusters.pdf"), width = 5.8 , height = 4
+        )
+
+write.table(matrix, file.path(figures_data, "Figure_6B_GO_transcriptional_clusters.txt"), sep = "\t", quote = F)
+
+```
+
+
+# Cell cycle score 
+```{r fig.width = 7, fig.height = 4.7 }
+
+#Plot S score
+FeaturePlot(seurat_integrated, features = c("S.Score"),raster=T, pt.size = 1.5,  min.cutoff = 0) +
+  ggtitle("S Score") +
+  theme_void() + 
+  theme(plot.title = element_text(size = 15, face = "bold"),
+        legend.text = element_text(size = 15, color = "black"))+
+  scale_color_distiller(palette = "Blues", direction = 1)
+ggsave(file.path(plot_path,"Figure_Sup_7C_Featureplot_S_score.pdf"), width= 7,height= 4.7)
+
+#Plot G2M score
+FeaturePlot(seurat_integrated, features = c("G2M.Score"),raster=T, pt.size = 1.5,   min.cutoff = 0)  +
+ ggtitle("G2M Score")+ 
+ theme_void()+
+ theme(plot.title = element_text(size = 15, face = "bold"),
+        legend.text = element_text(size = 15, color = "black"))+
+  scale_color_distiller(palette = "Greens",  direction = 1) 
+ggsave(file.path(plot_path,"Figure_Sup_7C_Featureplot_G2M_score.pdf"),width= 7,height= 4.7)
+
+#save data
+data = seurat_integrated@meta.data %>% select(S.Score, G2M.Score)
+
+umap_coords <- Embeddings(seurat_integrated, reduction = "umap")
+
+all(rownames(umap_coords) == rownames(data))
+data = cbind(umap_coords, data)
+
+write.table(data, file.path(figures_data, "Figure_Sup_7C_S.Score_G2M.Score.txt"), sep = "\t", quote = F)
+```
+
+
+
+# Cytokines expression
+```{r fig.width = 8, fig.height = 5}
+cytokines_genes = c("CXCL1", "CXCL2", "CXCL3", "CXCL8")
+
+plot_data = list()
+for (cytokine in cytokines_genes){
+plot <- FeaturePlot(seurat_integrated, reduction = 'umap',features = cytokine, min.cutoff = -1, raster=T, pt.size = 1.5) +
+        theme_void() +
+        theme(plot.title = element_text(size = 15, face = "bold"),
+        legend.text = element_text(size = 15, color = "black"))
+print(plot)
+#ggsave(paste0("Featureplot_", cytokine,".pdf"),path = plot_path_results_aft,width = 7.2,height = 4.7)
+plot_data[[cytokine]] = plot$data
+}
+
+for (cytokine in cytokines_genes[2:4]){
+  data = cbind(plot_data[[cytokines_genes[1]]], plot_data[[cytokine]][4])
+}
+
+
+write.table(data, file.path(figures_data, "Figure_Sup_7D_FeaturePlot_cytokines_expression.txt"), sep = "\t", quote = F)
+
+```
+
+
+
+
+# Intra-transcriptional cluster comparison of NFKB signaling activity
+
+```{r }
+# Load seurat object with single cell NFKB pathway scored 
+seurat_scored = readRDS( file.path(rds_path, "seurat_merged_NFKB_scored.rds" ))
+seurat_scored@meta.data$CB = rownames(seurat_scored@meta.data)
+
+seurat_integrated$CB = rownames(seurat_integrated@meta.data)
+
+seurat_integrated@meta.data  = seurat_integrated@meta.data %>% left_join(seurat_scored@meta.data[, c("CB","Patient", "Treatment", "TNFA_SIGNALING_VIA_NFKB")], by = "CB")
+rownames(seurat_integrated@meta.data ) = seurat_integrated$CB 
+df = seurat_integrated@meta.data  %>% select(Sample, Patient, Treatment, TNFA_SIGNALING_VIA_NFKB, seurat_clusters)
+
+#save Figure data
+write.table(data, file.path(figures_data, "Figure_6C_NFKB_pathway_score_intra_transcriptional_cluster.txt"), sep = "\t", quote = F)
+
+```
+
+```{r }
+#OO77
+
+df_OO77 = df %>% as.data.frame() %>% filter(Patient == "OO77", Treatment %in% c("Untreated", "In vivo")) 
+OO77_summary = df_OO77 %>% group_by(seurat_clusters, Treatment) %>% summarize(mean_pathway = mean( TNFA_SIGNALING_VIA_NFKB)
+                                                                             )
+OO77_summary$Treatment = factor(OO77_summary$Treatment , levels = c("Untreated", "In vivo"))
+OO77_summary$seurat_clusters = factor(OO77_summary$seurat_clusters, levels = 1:9)
+
+names(custom_palette ) = 1:9
+```
+
+```{r fig.width = 6, fig.height = 5}
+OO77_summary %>% 
+  ggplot(aes(x = Treatment, y = mean_pathway, group = seurat_clusters)) +
+  geom_point(aes(colour = Treatment), 
+             size = 2, 
+             position = position_dodge(width = 0)) + 
+  geom_line(aes(group = seurat_clusters, colour = seurat_clusters), 
+            linewidth = 1.5, 
+            alpha = 1, 
+            position = position_dodge(width = 0)) +
+  scale_color_manual(values = c("Untreated" = "deepskyblue2", 
+                                "In vivo" = "plum", 
+                                custom_palette )) +
+ # scale_y_continuous(limits = c(-0.05, 0.15)) +
+  ylab("Mean Pathway Score") +
+  ggtitle("OO77")+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 15, color = "black", face = "bold"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 15, color = "black"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 15, color = "black"),
+    axis.title.y = element_text(size = 15, color = "black"),
+    axis.text.y = element_text(size = 15, color = "black"),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+ggsave(file.path(plot_path , "Figure_6C_LinePlot_Mean_NFKb_each_clusters_OO77.pdf"),width= 6,height= 5,scale = 1)
+```
+
+```{r }
+#OO99
+
+df_OO99 = df %>% as.data.frame() %>% filter(Patient == "OO99", Treatment %in% c("Untreated", "In vivo")) 
+OO99_summary = df_OO99 %>% group_by(seurat_clusters, Treatment) %>% summarize(mean_pathway = mean( TNFA_SIGNALING_VIA_NFKB))
+OO99_summary$Treatment = factor(OO99_summary$Treatment , levels = c("Untreated", "In vivo"))
+OO99_summary$seurat_clusters = factor(OO99_summary$seurat_clusters, levels = 1:9)
+
+names(custom_palette ) = 1:9
+```
+```{r fig.width = 6, fig.height = 5}
+OO99_summary %>% 
+  ggplot(aes(x = Treatment, y = mean_pathway, group = seurat_clusters)) +
+  geom_point(aes(colour = Treatment), 
+             size = 2, 
+             position = position_dodge(width = 0)) + 
+  geom_line(aes(group = seurat_clusters, colour = seurat_clusters), 
+            linewidth = 1.5, 
+            alpha = 1, 
+            position = position_dodge(width = 0)) +
+  scale_color_manual(values = c("Untreated" = "deepskyblue2", 
+                                "In vivo" = "plum", 
+                                custom_palette )) +
+ # scale_y_continuous(limits = c(-0.05, 0.15)) +
+  ylab("Mean Pathway Score") +
+  ggtitle("OO99")+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 15, color = "black", face = "bold"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 15, color = "black"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 15, color = "black"),
+    axis.title.y = element_text(size = 15, color = "black"),
+    axis.text.y = element_text(size = 15, color = "black"),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+ggsave(file.path(plot_path ,  "Figure_6C_LinePlot_Mean_NFKb_each_clusters_OO99.pdf"),width= 6,height= 5, scale = 1)
+
+```
+
+```{r}
+#OO100
+
+df_OO100 = df %>% as.data.frame() %>% filter(Patient == "OO100", Treatment %in% c("Untreated", "In vivo")) 
+OO100_summary = df_OO100 %>% group_by(seurat_clusters, Treatment) %>% summarize(mean_pathway = mean( TNFA_SIGNALING_VIA_NFKB))
+OO100_summary$Treatment = factor(OO100_summary$Treatment , levels = c("Untreated", "In vivo"))
+OO100_summary$seurat_clusters = factor(OO100_summary$seurat_clusters, levels = 1:9)
+
+names(custom_palette ) = 1:9
+```
+
+```{r fig.width = 6, fig.height = 5}
+
+OO100_summary %>% 
+  ggplot(aes(x = Treatment, y = mean_pathway, group = seurat_clusters)) +
+  geom_point(aes(colour = Treatment), 
+             size = 2, 
+             position = position_dodge(width = 0)) + 
+  geom_line(aes(group = seurat_clusters, colour = seurat_clusters), 
+            linewidth = 1.5, 
+            alpha = 1, 
+            position = position_dodge(width = 0)) +
+  scale_color_manual(values = c("Untreated" = "deepskyblue2", 
+                                "In vivo" = "plum", 
+                                custom_palette )) +
+ # scale_y_continuous(limits = c(-0.05, 0.15)) +
+  ylab("Mean Pathway Score") +
+  ggtitle("OO100")+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 15, color = "black", face = "bold"),
+    legend.position = "right",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 15, color = "black"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 15, color = "black"),
+    axis.title.y = element_text(size = 15, color = "black"),
+    axis.text.y = element_text(size = 15, color = "black"),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+ggsave(file.path(plot_path ,  "Figure_6C_LinePlot_Mean_NFKb_each_clusters_OO100.pdf"),width= 6,height= 5,scale = 1)
+```
+
+# Regulons detected from pySCENIC
+```{r }
+regulons <- read.csv(file.path(txt_files,"regulons.csv"), stringsAsFactors = FALSE)
+regulons_clean <- regulons[-1, ]
+# Rename the columns for clarity
+colnames(regulons_clean) <- c("TF", "MotifID", "AUC", "NES", "MotifSimilarityQvalue",  "OrthologousIdentity"  ,
+                              "Annotation"   ,         "Context"       ,        "TargetGenes"    , "RankAtMax" )
+
+# Convert numeric columns (AUC, NES, MotifSimilarityQvalue) from character to numeric
+regulons_clean$AUC <- as.numeric(regulons_clean$AUC)
+regulons_clean$NES <- as.numeric(regulons_clean$NES)
+regulons_clean$MotifSimilarityQvalue <- as.numeric(regulons_clean$MotifSimilarityQvalue)
+
+regulons_clean = regulons_clean  %>% mutate( ID = paste0(TF, "_", MotifID))
+
+# NFKB1 regulon
+NFKB1_regulons <- regulons_clean[grepl("NFKB1", regulons_clean$TF, ignore.case=TRUE), ]
+
+cytokines <- c("CXCL1", "CXCL2", "CXCL3", "CXCL8")
+NFKB1_cytokines_regulons <- NFKB1_regulons[grepl(paste(cytokines, collapse="|"), NFKB1_regulons$TargetGenes), ]
+NFKB1_cytokines_regulons_direct <- NFKB1_cytokines_regulons %>%
+  filter(Annotation == "gene is directly annotated")
+
+#NFKB1
+json_string <- NFKB1_cytokines_regulons_direct$TargetGenes[2]
+
+# Remove leading and trailing square brackets
+json_clean <- gsub("^\\[|\\]$", "", json_string)
+
+# Replace (' and ') with c(" and ")
+json_clean <- gsub("\\('", 'c("', json_clean)
+json_clean <- gsub("'\\)", '")', json_clean)
+
+# Replace ', ' separator with ', '
+json_clean <- gsub("', ", '", ', json_clean)
+# Evaluate each element
+regulon_list <- eval(parse(text = paste0("list(", json_clean, ")")))
+
+# Convert to data frame
+regulon_df <- do.call(rbind, lapply(regulon_list, function(x) data.frame(Gene = x[1], Weight = as.numeric(x[2]))))
+rownames(regulon_df) <- NULL
+
+regulon_df <- regulon_df %>% arrange(Weight)
+```
+
+# NFKB1 regulon genes ranking
+```{r fig.width = 14, fig.height = 15}
+plot <- ggplot(regulon_df, aes(x = reorder(Gene, Weight), y = Weight, fill = Weight)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "NFKB1 Regulon",
+       x = "Gene",
+       y = "Weight") +
+  scale_fill_gradient2( low = "white", "high" = "red")+
+  theme_classic()+
+  theme(legend.position = "None",
+    plot.title = element_text(size = 33, color = "black" ),
+    axis.title.y.left = element_text(size = 33, color = "black" ),
+    axis.text.y.left = element_text(size = 33,  color = "black"),
+    axis.text.x.bottom = element_text(size = 33,  color = "black"),
+    axis.title.x.bottom = element_text(size = 33,  color = "black"))
+plot 
+ggsave(file.path(plot_path,"Figure_6D_NFKB1_regulon.pdf" ), width= 13.8, height = 15,scale =1)
+
+data <- plot$data
+head(data)
+write.table(data, file.path(figures_data,"Figure_6D_NFKB1_regulon.txt" ), sep = "\t", quote = F)
+```
+
+
+```{r }
+#Load file
+seurat_integrated <- readRDS(file.path(rds_path,'clustered_0.35_integrated_seurat_ref.rds'))
+DefaultAssay(seurat_integrated) <- "RNA"
+options(future.globals.maxSize = 10 * 1024^3)  # 10 GB
+seurat_integrated <- SCTransform(seurat_integrated, 
+                                 vst.flavor = "v1",
+                                  variable.features.n = nrow(seurat_integrated ))
+```
+
+# NFKB1 regulon activities across transcriptional clusters
+```{r fig.width = 10, fig.height = 8}
+#load regulon AUC score 
+auc <- read.delim(file.path(txt_files,"auc_mtx_NFKB.tsv"))
+
+colnames(auc) = paste0(colnames(auc), "_regulon")
+seurat_integrated@meta.data = cbind(seurat_integrated@meta.data, auc)
+
+df = seurat_integrated@meta.data  
+
+
+
+custom_palette <- c(  "#80B1D3", "limegreen", "#FCCDE5" ,
+                  "#FDB462","#D9D9D9", "#CCEBC5" ,
+                 "#BC80BD" , "khaki1",  "brown1") 
+
+df$seurat_clusters = factor(df$seurat_clusters, levels = 1:9)
+
+plot <- df %>% ggplot(aes(x= seurat_clusters, y = NFKB1_regulon, color = seurat_clusters  )) +  
+      geom_violin(linewidth = 1)+
+      geom_boxplot(width = 0.2, linewidth = 1) +
+      scale_color_manual(values = custom_palette ) +
+      ylab("NFKB1 regulon activity")+
+      theme_classic()+
+      theme(
+    legend.position = "none",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 31, color = "black"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 31, color = "black"),
+    axis.title.y = element_text(size = 31, color = "black"),
+    axis.text.y = element_text(size = 31, color = "black"),
+  ) + guides(color = guide_legend(nrow = 1))
+
+plot
+ggsave(file.path(plot_path , "Figure_6E_NFKB1_regulon_across_seurat_clusters.pdf"),width= 8,height= 4.8,scale = 1)
+
+#Save Figure data
+df <- df %>%
+  mutate(
+    Patient = word(Sample, 1),
+    Treatment = word(Sample, 2)
+  ) %>% select(Patient, Treatment, seurat_clusters, NFKB1_regulon)
+
+write.table(df, file.path(figures_data, "Figure_6E_NFKB1_regulon_activity_across_clusters.txt"), sep = "\t", quote = F)
+
+```
+
+# NFKB1 regulon genes expression between cells of cluster 9 and cells of other clusters
+```{r }
+# Bar plot of Log2FC
+Idents(seurat_integrated) = "seurat_clusters"
+plot <- DotPlot(seurat_integrated,features= regulon_df$Gene) + coord_flip()
+data = plot$data
+data_wide <- data %>%
+  pivot_wider(
+    id_cols = features.plot,
+    names_from = id,
+    values_from = avg.exp,
+    values_fill = 0
+  ) %>%
+  rename(gene = features.plot)
+
+data_wide = data_wide %>%  mutate(others = rowMeans(select(., `1`:`8`)),
+                                  Log2FC = log2(`9`/others)) %>%
+                           arrange(desc(Log2FC))
+```
+
+```{r fig.width = 13, fig.height = 14}
+
+data_wide %>% ggplot(aes(x = reorder(gene, Log2FC), y = Log2FC, fill = Log2FC)) + 
+              geom_bar(stat = "identity") +
+              coord_flip() +
+  labs(
+       x = "Gene",
+       y = "Log2FC(Cluster 9/Others)") +
+  scale_fill_gradient2(
+    low = "white",     # low values
+    high = "red",     # high values
+    midpoint = 0      # centered at zero for log fold-change
+  ) +
+  theme_classic()+
+  theme(legend.position = "None",
+    plot.title = element_text(size = 33, color = "black" ),
+    axis.title.y.left = element_text(size = 33, color = "black" ),
+    axis.text.y.left = element_text(size = 33,  color = "black"),
+    axis.text.x.bottom = element_text(size = 33,  color = "black"),
+    axis.title.x.bottom = element_text(size = 33,  color = "black"))
+ggsave(file.path(plot_path, "Figure_6E_Barplot_NFKB1_regulon_expression_clusters.pdf"),width= 13.8,height= 15)   
+
+
+write.table(data_wide , file.path(figures_data, "Figure_6E_Barplot_NFKB1_regulon_expression_across_clusters.txt"), sep = "\t", quote = F)
+```
+
+# Dotplot of NFKB1 regulon genes across transcriptional clusters
+```{r fig.width = 10, fig.height = 10}
+Idents(seurat_integrated) = "seurat_clusters"
+genes_order = rev(data_wide$gene)
+plot <- DotPlot(seurat_integrated,features= genes_order) + coord_flip()
+plot
+ggsave(file.path( plot_path, "Figure_6E_Dotplot_NFKB1_regulon_across_clusters.pdf"),width= 8,height= 8)
+
+data = plot$data
+write.table(data , file.path(figures_data, "Figure_6E_Dotplot_NFKB1_regulon_across_clusters.txt"), sep = "\t", quote = F)
+```
+
+
+# Cytokines expression of cluster 9 in Untreated, Ex vivo and  In vivo samples 
+```{r }
+#Cluster 9
+seurat_sub_9 <- subset(seurat_integrated, subset = seurat_clusters == 9)
+
+meta <- seurat_sub_9@meta.data
+meta$CB_seurat <- rownames(meta)
+meta <- meta %>%
+  mutate(Treatment = case_when(
+    grepl("-no", orig.ident) ~ "Untreated",
+    grepl("-vitro", orig.ident) ~ "Ex vivo",
+    grepl("-vivo", orig.ident) ~ "In vivo",
+    TRUE ~ orig.ident)
+  )
+meta <- meta %>% mutate(Patient = sub("-.*","",orig.ident))
+
+seurat_sub_9@meta.data <- meta
+rownames(seurat_sub_9@meta.data) <- rownames(meta)
+
+
+
+DefaultAssay(seurat_sub_9)<-'RNA'
+seurat_sub_9 <- SCTransform(seurat_sub_9 )
+
+Genes =  c("CXCL1","CXCL2","CXCL3", "CXCL8")
+Idents(seurat_sub_9)= "orig.ident"
+
+norm_data = seurat_sub_9$SCT$data
+norm_data_genes = as.data.frame(norm_data[Genes,])
+norm_data_genes$gene = rownames(norm_data_genes)
+norm_data_genes_longer = norm_data_genes %>%  pivot_longer(cols = 1:816,names_to = "CB_seurat", values_to = "Expression")
+norm_data_genes_longer = norm_data_genes_longer %>% left_join(meta[, c("CB_seurat","Patient", "Treatment")], by = "CB_seurat")
+norm_data_genes_longer$Treatment = factor(norm_data_genes_longer$Treatment, levels = c("Untreated", "Ex vivo", "In vivo"))
+norm_data_genes_longer$Patient = factor(norm_data_genes_longer$Patient, levels = c("OO77", "OO100", "OO99"))
+norm_data_genes_longer$gene = factor(norm_data_genes_longer$gene, levels = Genes)
+```
+
+```{r fig.width = 9, fig.height = 13}
+plot <- norm_data_genes_longer %>% ggplot(aes(x = Treatment,y= Expression,colour = Treatment ))+
+  geom_violin(
+    trim = TRUE, 
+    width = 0.7, 
+    alpha = 0.5, 
+    aes(color = Treatment),
+  ) +
+  geom_boxplot(
+    width = 0.15, 
+    position = position_dodge(width = 0.75), 
+    aes(color = Treatment), 
+    fill = "white", 
+    alpha = 0.7,
+    outlier.size = 0.1,
+  ) +
+ scale_color_manual(values = c("deepskyblue2","tomato","plum"))+
+ ylim(-0.5,6)+
+ geom_jitter(size = 0.1, alpha = 0.1, aes(fill = Treatment))+
+ ylab("Normalized expression")+
+ theme_classic()+
+  theme(legend.position = "bottom", 
+       legend.title = element_blank(),
+       legend.text = element_text(size = 28, color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y = element_text(size = 28, color = "black"),
+        axis.text.y = element_text(size = 28, color = "black"),
+        strip.text = element_text(size = 28, color = "black"),
+        strip.background = element_blank(),
+        panel.spacing = unit(1.1, "lines") ) + facet_grid(col = vars(Patient), row= vars(gene))
+
+plot 
+ggsave( file.path(plot_path,"Figure_6F_cytokines_expression_across_samples.pdf"), width = 8.5, height = 12)
+
+#Save Figure data
+data = plot$data
+head(data)
+
+write.table(data, file.path(figures_data, "Figure_6F_cytokines_expression_across_samples.txt"), sep = "\t", quote = F )
+```
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,460 @@
+---
+title: "Stomach cancer paper Figure Sup 8B"
+author: "Vi Dang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    css: font.css
+---
+
+```{r setup, include = FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r }
+library(tidyverse)
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(RCurl)
+library(cowplot)
+library(patchwork)
+library(vegan)
+library(pheatmap)
+library(ggpubr)
+library(diptest)
+```
+
+
+```{r }
+# Specify the path
+main_path <- '/group/poetsch_projects/poetsch_sc/Stomach_paper_repository'
+rds_path  <- file.path(main_path,'RDS')
+txt_files <- file.path(main_path,'txt_files')
+plot_path <- file.path(main_path,"Figures", "Figure_Sup_5")
+figures_data <- file.path(main_path,"Figures_data")
+dir.create(plot_path )
+```
+# Before separation of clone 5
+```{r }
+# Load the mutation detected in single cell of scRNA-seq (done with scReadCount and SCOMATIC) 
+patient="OO77"
+Combined_all = read.table(file.path(txt_files,paste0(patient,"_Combined_all.txt")))
+head(Combined_all)
+
+# Load assigned single cell RNA-seq 
+seurat_patient = readRDS(file.path(rds_path,paste0(patient,"_three_samples_raw_Clones.rds")))
+clones_list_all =   c( "2", "4","5","6", "7" ,"8", "UnI")
+seurat_patient@meta.data$treatment = factor(seurat_patient@meta.data$treatment , levels = c("Untreated", "Ex vivo", "In vivo"))
+seurat_patient@meta.data$Clone = factor(seurat_patient@meta.data$Clone, levels = clones_list_all)
+```
+
+## Merge clone 4 to 5
+```{r }
+Combined_all = Combined_all %>% mutate( treeCLUSTER_merged = ifelse(treeCLUSTER == 4,5, treeCLUSTER)) 
+```
+
+## Intra-clone distance 
+```{r }
+#Use 30 PC
+pca_embeddings <- Embeddings(seurat_patient, reduction = "pca")
+pca_30 <- t(as.matrix(pca_embeddings[,1:30]))
+
+#Function to calculate the intr-clone pairwise distance
+Distance_2_muts <- function(set_2_muts){
+mut1 = set_2_muts[1]
+mut2 = set_2_muts[2]
+CB_mut1 = Combined_all %>% filter((mutation_id == mut1) & (mutated == T)) %>% pull(CB_seurat)
+CB_mut2 = Combined_all %>% filter((mutation_id == mut2) & (mutated == T)) %>% pull(CB_seurat)
+meta = seurat_patient@meta.data 
+meta$CB = rownames(meta)
+meta = meta %>% mutate(mut1 = ifelse(CB %in% CB_mut1,TRUE, FALSE),
+                       mut2 = ifelse(CB %in% CB_mut2, TRUE, FALSE))
+
+ALT_mut1 <- meta %>% filter(mut1 == TRUE) %>% pull(CB) 
+ALT_mut2 <-  meta %>% filter(mut2 == TRUE) %>% pull(CB) 
+
+
+# Centroid method
+pca_ALT_mut1 <- pca_30[ , ALT_mut1]
+pca_ALT_mut2 <- pca_30[, ALT_mut2]
+centroid_ALT_mut1 <- rowMeans(pca_ALT_mut1)
+centroid_ALT_mut2 <- rowMeans(pca_ALT_mut2)
+centroids_distance <- 1- cor(centroid_ALT_mut1, centroid_ALT_mut2, method="spearman")
+df = data.frame(mut1 = mut1, mut2 = mut2, dist = centroids_distance)
+#Complete distance method
+# ALT_both <- c(ALT_mut1,ALT_mut2)
+# spearman_dist_mut <- 1-cor(pca_30[,ALT_both], method = "spearman")
+# dist = mean(spearman_dist_mut[ALT_mut1,ALT_mut2])
+# df = data.frame(mut1 = mut1, mut2 = mut2, dist = dist)
+df
+}
+
+#Function to filter mut with ALT >= threshold 
+Filter_mut <- function(mut, threshold){
+CB_pos = Combined_all %>% filter((mutation_id == mut) & (mutated == T)) %>% pull(CB_seurat)
+CB_neg = Combined_all %>% filter((mutation_id == mut) & (mutated == F)) %>% pull(CB_seurat)
+meta = seurat_patient@meta.data 
+meta$CB = rownames(meta)
+meta = meta %>% mutate(mut = case_when( CB %in% CB_pos ~ "ALT",
+                                        CB %in% CB_neg ~ "REF",
+                                        TRUE ~ "UNK"))
+
+n_ALT <- meta %>% filter(mut == "ALT") %>% pull(CB) %>% length()
+n_REF <- meta %>% filter(mut == "REF") %>% pull(CB) %>% length()
+return = FALSE
+if (n_ALT >= threshold) {return= TRUE} 
+return
+}
+
+#Calculate Score
+Intra_Clone_Dist_score <- function(clone, threshold){
+  mutations = Combined_all %>% filter( treeCLUSTER_merged == clone) %>% pull(mutation_id) %>% unique()
+
+  keep = purrr::map(mutations,~Filter_mut(.x, threshold = threshold)) %>% unlist()
+
+  mutations = mutations[keep]
+  Score = data.frame(mut1 = "", mut2 = "", dist = 0)
+  if (length(mutations) > 1){
+  sets_2_muts_mat <- combn(mutations, 2)
+  sets_2_muts  <- split(sets_2_muts_mat , col(sets_2_muts_mat ))
+  Score = purrr::map_dfr(sets_2_muts , Distance_2_muts)
+  } 
+  Score$Clone = clone
+  Score$n_muts = length(mutations)
+  Score
+}
+
+clones = c(1,2,6,5)
+
+Threshold_test_intra_clone <- function(threshold){
+df = purrr::map_dfr(clones,~Intra_Clone_Dist_score(.x, threshold = threshold ))
+df$Clone = factor(as.character(df$Clone), levels = clones)
+df$threshold = threshold
+df
+}
+
+thresholds = 6
+All_thresholds_intra_clone = purrr::map_dfr(thresholds,Threshold_test_intra_clone)
+```
+
+```{r fig.width = 5.5, fig.height = 4.5}
+#Plot histogram of these distances
+for (clone in clones){
+Distance_Clone_df = All_thresholds_intra_clone %>% filter(Clone == clone) 
+nmuts =  Distance_Clone_df %>% pull(n_muts) %>% unique()
+
+#test unimodality
+Dists  = Distance_Clone_df %>% pull(dist)
+dip_test <- dip.test(Dists)
+p_value = dip_test$p.value
+
+plot <- ggplot(Distance_Clone_df , aes(x = dist)) +
+  geom_histogram(bins = 25, fill = "gray", color = "black") +
+  xlim(0, 1.7) +
+ ylim(0, 1700) +
+  labs(
+    title = paste0("Clone ", clone, " (", nmuts, " mutations)"),
+    x = "PIC distance",
+    y = "Frequency"
+  ) +
+annotate("text", x = 1.4, y = 1600, label = paste("p =", signif(p_value, 4)), size = 8.5)+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 25, color = "black"),
+    axis.title.x = element_text(size = 25, color = "black"),
+    axis.title.y = element_text(size = 25, color = "black"),
+    axis.text.x = element_text(size = 25, color = "black"),
+    axis.text.y = element_text(size = 25, color = "black")
+  )
+print(plot)
+ggsave(file.path(plot_path,paste0("Figure_Sup_5A_Pairwise_Intra_", clone,".pdf")), width= 5.5, height = 4.5)
+}
+
+#Save Figure data
+data = All_thresholds_intra_clone %>% select(Clone, n_muts,mut1, mut2, dist)
+write.table(data, file.path(figures_data, "Figure_Sup_5A_Pairwise_Intra_Clone_Distance_OO77.txt"),sep = "\t", quote= F) 
+```
+
+## Dimplot of each clone 
+```{r fig.width = 4,fig.height = 4.5}
+Combined_all_CB = Combined_all %>% filter(mutated == TRUE) %>% group_by(CB_seurat) %>% summarize(clone = treeCLUSTER_merged)
+mutated_CB = as.data.frame(table(Combined_all_CB$CB_seurat,Combined_all_CB$clone)) 
+colnames(mutated_CB) = c("CB_seurat","Clone","Freq")
+mutated_CB = mutated_CB %>% pivot_wider(names_from = "Clone", values_from = "Freq")
+head(mutated_CB)
+
+#Clone_1
+mutated_CB  <- mutated_CB %>% 
+  mutate(Clone_1 = case_when(
+    `1` > 0 ~ "Detected",
+    TRUE ~ "Undetected"
+  ))
+
+meta = seurat_patient@meta.data
+meta$CB_seurat = rownames(meta) 
+meta = meta %>% left_join(mutated_CB[,c("CB_seurat","Clone_1")], by = "CB_seurat")
+meta$Clone_1[(meta$Clone_1 != "Detected") | (is.na(meta$Clone_1 ))] =    "Undetected"
+meta$Clone_1 = factor(meta$Clone_1 , levels = c("Detected",  "Undetected"  ))
+seurat_patient@meta.data = meta
+rownames(seurat_patient@meta.data) = seurat_patient@meta.data$CB_seurat
+
+
+colors = c("cadetblue2","gray92")
+DimPlot(seurat_patient, reduction = "umap", group.by = "Clone_1" , cols = colors, raster = T, pt.size = 2.5) + 
+       labs(title = "Clone 1") +
+       theme_void()+
+       theme(legend.position = "bottom",
+             plot.title = element_text(size = 25),
+             legend.text = element_text(size = 25) )  
+ggsave(file.path(plot_path,paste0("Figure_Sup_5A_DimPlot_Clone_1.pdf")),width = 4,height = 4.5)
+
+
+#Clone_2
+mutated_CB  <- mutated_CB %>% 
+  mutate(Clone_2 = case_when(
+    `2` > 0 ~ "Detected",
+    TRUE ~ "Undetected"
+  ))
+
+meta = seurat_patient@meta.data
+meta$CB_seurat = rownames(meta) 
+meta = meta %>% left_join(mutated_CB[,c("CB_seurat","Clone_2")], by = "CB_seurat")
+meta$Clone_2[(meta$Clone_2 != "Detected") | (is.na(meta$Clone_2 ))] =    "Undetected"
+meta$Clone_2 = factor(meta$Clone_2 , levels = c("Detected",  "Undetected"))
+seurat_patient@meta.data = meta
+rownames(seurat_patient@meta.data) = seurat_patient@meta.data$CB_seurat
+#seurat_patient_Clone2 <- subset(seurat_patient, Clone_2 == c("Clone 2"))
+
+colors = c("lightgreen", "gray92")
+DimPlot(seurat_patient, reduction = "umap", group.by = "Clone_2" , cols = colors,   raster = T, pt.size = 2.5) +
+  labs(title = "Clone 2")+
+   theme_void()+
+    theme(legend.position = "bottom",
+         plot.title = element_text(size = 25),
+         legend.text = element_text(size = 25) )  
+ggsave(file.path(plot_path,paste0("Figure_Sup_5A_DimPlot_Clone_2.pdf")),width = 4,height = 4.5)
+
+
+#Clone_5
+mutated_CB  <- mutated_CB %>% 
+  mutate(Clone_5 = case_when(
+    `5` > 0 ~ "Detected",
+    TRUE ~ "Undetected"
+  ))
+
+meta = seurat_patient@meta.data
+meta$CB_seurat = rownames(meta) 
+meta = meta %>% left_join(mutated_CB[,c("CB_seurat","Clone_5")], by = "CB_seurat")
+meta$Clone_5[(meta$Clone_5 != "Detected") | (is.na(meta$Clone_5 ))] =    "Undetected"
+meta$Clone_5 = factor(meta$Clone_5 , levels = c("Detected",  "Undetected"))
+seurat_patient@meta.data = meta
+rownames(seurat_patient@meta.data) = seurat_patient@meta.data$CB_seurat
+
+
+colors = c("dodgerblue2", "gray92")
+DimPlot(seurat_patient, reduction = "umap", group.by = "Clone_5" , cols = colors,   raster = T, pt.size = 2.5) + 
+     labs(title = "Clone 5") +
+      theme_void()+
+      theme(legend.position = "bottom",
+            plot.title = element_text(size = 25),
+            legend.text = element_text(size = 25) )  
+ggsave(file.path(plot_path,paste0("Figure_Sup_5A_DimPlot_Clone_5.pdf")),width = 4,height = 4.5)
+
+
+#Clone_6
+mutated_CB  <- mutated_CB %>% 
+  mutate(Clone_6 = case_when(
+    `6` > 0 ~ "Detected",
+    TRUE ~ "Undetected"
+  ))
+
+meta = seurat_patient@meta.data
+meta$CB_seurat = rownames(meta) 
+meta = meta %>% left_join(mutated_CB[,c("CB_seurat","Clone_6")], by = "CB_seurat")
+meta$Clone_6[(meta$Clone_6 != "Detected") | (is.na(meta$Clone_6 ))] =    "Undetected"
+meta$Clone_6 = factor(meta$Clone_6 , levels = c("Detected",  "Undetected"))
+seurat_patient@meta.data = meta
+rownames(seurat_patient@meta.data) = seurat_patient@meta.data$CB_seurat
+
+
+colors = c("mediumseagreen", "gray92")
+DimPlot(seurat_patient, reduction = "umap", group.by = "Clone_6" , cols = colors,   raster = T, pt.size = 2.5) +
+        labs(title = "Clone 6") +
+        theme_void()+
+         theme(legend.position = "bottom",
+            plot.title = element_text(size = 25),
+            legend.text = element_text(size = 25) )  
+ggsave(file.path(plot_path,paste0("Figure_Sup_5A_DimPlot_Clone_6.pdf")),width = 4,height = 4.5)
+
+
+#save Figures data
+umap_coords <- Embeddings(seurat_patient, reduction = "umap")
+
+all(rownames(umap_coords) == rownames(seurat_patient@meta.data))
+data = cbind(umap_coords, seurat_patient@meta.data)
+
+head(data)
+
+write.table(data, file.path(figures_data, "Figure_Sup_5A_UMAP_clone_detected_OO77.txt"), sep = "\t", quote= F)
+```
+
+# Separate clone 5
+```{r }
+
+Centroid_mut <- function(mut){
+  CB_mut = Combined_all %>% filter((mutation_id == mut) & (mutated == T)) %>% pull(CB_seurat)
+  meta = seurat_patient@meta.data 
+  meta$CB = rownames(meta)
+  meta = meta %>% mutate(mut = ifelse(CB %in% CB_mut,TRUE, FALSE))
+  
+  #muatated cells
+  ALT_mut <- meta %>% filter(mut == TRUE) %>% pull(CB) 
+
+  # Centroid 
+  pca_ALT_mut <- as.data.frame(pca_30[ , ALT_mut])
+  if (nrow(pca_ALT_mut) == 1){
+    df = as.data.frame( pca_ALT_mut)
+    }else{
+  centroid_ALT_mut <- rowMeans(pca_ALT_mut)
+  df = as.data.frame(t(centroid_ALT_mut))
+    }
+  df$mutation_id = mut
+  df
+}
+
+mutations = Combined_all %>% filter(mutated == TRUE, treeCLUSTER_merged == 5) %>% pull(mutation_id) %>% unique()
+
+clone_centroids = purrr::map_dfr(mutations, Centroid_mut)
+
+#Cluster mutations
+set.seed(123) # Setting seed for reproducibility
+kmeans_result <- kmeans(clone_centroids[,1:30], centers = 2)
+
+# Add the cluster assignments to the data frame
+clone_centroids$cluster <- kmeans_result$cluster
+clone_centroids <- clone_centroids %>% mutate(cluster = ifelse(cluster == 1, "5b","5a"))
+```
+
+# After the separation of cluster 5
+## Intra-clone distance
+```{r fig.width = 5.5,fig.height = 4.5}
+seurat_patient = readRDS(file.path(rds_path, paste0(patient,"_three_samples_merged_separated_5_Clones.rds")))
+Combined_all = read.table( file.path(txt_files,paste0(patient,"_Combined_all_merged_separated_c5.txt")))
+
+clones = c("5a","5b")
+All_thresholds_intra_clone = purrr::map_dfr(thresholds,Threshold_test_intra_clone)
+
+
+pca_embeddings <- Embeddings(seurat_patient, reduction = "pca")
+pca_30 <- t(as.matrix(pca_embeddings[,1:30]))
+#Plot histogram of these distances
+for (clone in clones){
+Distance_Clone_df = All_thresholds_intra_clone %>% filter(Clone == clone) 
+nmuts =  Distance_Clone_df %>% pull(n_muts) %>% unique()
+
+#test unimodality
+Dists  = Distance_Clone_df %>% pull(dist)
+dip_test <- dip.test(Dists)
+p_value = dip_test$p.value
+
+plot <- ggplot(Distance_Clone_df , aes(x = dist)) +
+  geom_histogram(bins = 25, fill = "gray", color = "black") +
+  xlim(0, 1.7) +
+ ylim(0, 1700) +
+  labs(
+    title = paste0("Clone ", clone, " (", nmuts, " mutations)"),
+    x = "PIC distance",
+    y = "Frequency"
+  ) +
+annotate("text", x = 1.4, y = 1600, label = paste("p =", signif(p_value, 4)), size = 8.5)+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 25, color = "black"),
+    axis.title.x = element_text(size = 25, color = "black"),
+    axis.title.y = element_text(size = 25, color = "black"),
+    axis.text.x = element_text(size = 25, color = "black"),
+    axis.text.y = element_text(size = 25, color = "black")
+  )
+print(plot)
+ggsave(file.path(plot_path, paste0("Figure_Sup_5B_Pairwise_Intra_Clone_Distance_", clone, "_OO77.pdf")), width= 5.5, height = 4.5)
+}
+
+#Save Figure data
+data = All_thresholds_intra_clone %>% filter(Clone %in% c("5a","5b")) %>%select(Clone, n_muts,mut1, mut2, dist)
+write.table(data, file.path(figures_data, "Figure_Sup_5B_Pairwise_Intra_Clone_Distance_5a_5b_OO77.txt"),sep = "\t", quote= F) 
+
+```
+
+## Dimplot for clone 5a and 5b
+```{r }
+Combined_all_CB = Combined_all %>% filter(mutated == TRUE) %>% group_by(CB_seurat) %>% summarize(clone = treeCLUSTER)
+mutated_CB = as.data.frame(table(Combined_all_CB$CB_seurat,Combined_all_CB$clone)) 
+colnames(mutated_CB) = c("CB_seurat","Clone","Freq")
+mutated_CB = mutated_CB %>% pivot_wider(names_from = "Clone", values_from = "Freq")
+head(mutated_CB)
+
+clone_columns = c( "5a","5b")
+mutated_CB_clone = mutated_CB[,intersect(clone_columns,colnames(mutated_CB)) ]
+
+
+#Clone_5a and 5b
+Find_max_col = function(row) {
+  max_value = max(row) # store the maximum value
+  if (max_value > 0) {
+    return(colnames(mutated_CB_clone)[which(row == max_value)][1])
+  } else {
+    return("Undetected")
+  }
+}
+
+mutated_CB_clone$Clone_5ab = apply(mutated_CB_clone, 1, Find_max_col)
+mutated_CB$Clone_5ab =  mutated_CB_clone$Clone_5ab
+
+table(mutated_CB$Clone_5ab)
+
+meta = seurat_patient@meta.data
+meta$CB_seurat = rownames(meta) 
+meta = meta %>% left_join(mutated_CB[,c("CB_seurat","Clone_5ab")], by = "CB_seurat")
+meta$Clone_5ab[is.na(meta$Clone_5ab )] =    "Undetected"
+meta$Clone_5ab = factor(meta$Clone_5ab , levels = c("5a","5b",  "Undetected"))
+meta = meta %>% mutate(Clone_5ab = case_when(meta$Clone_5ab == "5a" ~ "Clone 5a",
+                                             meta$Clone_5ab == "5b" ~ "Clone 5b",
+                                             TRUE ~ "Undetected"))
+seurat_patient@meta.data = meta
+rownames(seurat_patient@meta.data) = seurat_patient@meta.data$CB_seurat
+```
+
+```{r fig.width = 6.5,fig.height = 4.5}
+colors = c( "lightblue","dodgerblue2", "gray92")
+DimPlot(seurat_patient, reduction = "umap", group.by = "Clone_5ab" , cols = colors , raster = T, pt.size = 2.5) + labs(title = "Clone 5 separated") +
+        theme_void()+
+        theme(
+          plot.title = element_text(size = 25),
+          legend.text = element_text(size = 25) )  
+ggsave(file.path(plot_path,"Figure_Sup_5B_UMAP_clone_detected_5a_5b_OO77.pdf"),width = 6.5,height = 4.5)
+
+
+#save Figures data
+umap_coords <- Embeddings(seurat_patient, reduction = "umap")
+
+all(rownames(umap_coords) == rownames(seurat_patient@meta.data))
+data = cbind(umap_coords, seurat_patient@meta.data)
+data = data %>% select(umap_1  ,  umap_2 , Clone_5ab)
+head(data)
+
+write.table(data, file.path(figures_data, "Figure_Sup_5B_UMAP_clone_detected_5a_5b_OO77.txt"), sep = "\t", quote= F)
+
+```
+
+```{r }
+sessionInfo()
+```
